@@ -1,0 +1,194 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: parknear
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d parknear"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # -- Telemetría del gateway (hypertable bus_logs, ver serviceBus/init.sql) --
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${TIMESCALE_PASSWORD:-postgres}
+      POSTGRES_DB: servicebus_db
+    ports:
+      - "${TIMESCALE_PORT:-5433}:5432"
+    volumes:
+      - tsdata:/var/lib/postgresql/data
+      - ./Parknear-serviceBus/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d servicebus_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  auth:
+    build: ./parknear-auth-service
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/parknear
+      JWT_SECRET: ${JWT_SECRET:-secretKey}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
+    ports:
+      - 3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"const s=require('net').connect(3000,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  users:
+    build: ./parknear-users-service
+    environment:
+      PORT: 3001
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/parknear
+      JWT_SECRET: ${JWT_SECRET:-secretKey}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
+    ports:
+      - 3001
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"const s=require('net').connect(3001,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  zones:
+    build: ./parknear-zones-service
+    environment:
+      PORT: 3002
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/parknear
+      JWT_SECRET: ${JWT_SECRET:-secretKey}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
+    ports:
+      - 3002
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"const s=require('net').connect(3002,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  reservations:
+    build: ./parknear-reservations-service
+    environment:
+      PORT: 3004
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/parknear
+      JWT_SECRET: ${JWT_SECRET:-secretKey}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
+    ports:
+      - 3004
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"const s=require('net').connect(3004,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  payments:
+    build: ./parknear-payments-service
+    environment:
+      PORT: 3005
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/parknear
+      JWT_SECRET: ${JWT_SECRET:-secretKey}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
+      MERCADOPAGO_ACCESS_TOKEN: ${MERCADOPAGO_ACCESS_TOKEN:-}
+      MERCADOPAGO_WEBHOOK_SECRET: ${MERCADOPAGO_WEBHOOK_SECRET:-}
+    ports:
+      - 3005
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"const s=require('net').connect(3005,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+  support:
+    build: ./parknear-support-service
+    environment:
+      PORT: 3006
+    ports:
+      - 3006
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"const s=require('net').connect(3006,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # -- Gateway: enruta /auth /users /zonas /tickets /reservas /pagos ---------
+  service-bus:
+    build:
+      context: ./Parknear-serviceBus
+      dockerfile: DOCKERFILE
+    environment:
+      BIND_ADDR: 0.0.0.0:3003
+      DATABASE_URL: postgres://postgres:${TIMESCALE_PASSWORD:-postgres}@timescaledb:5432/servicebus_db
+      AUTH_BASE_URL: http://auth:3000
+      USERS_BASE_URL: http://users:3001
+      ZONES_BASE_URL: http://zones:3002
+      RESERVATIONS_BASE_URL: http://reservations:3004
+      PAYMENTS_BASE_URL: http://payments:3005
+      TICKETS_BASE_URL: http://tickets:3006
+      RUST_LOG: info
+    ports:
+      - 3003
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+      users:
+        condition: service_healthy
+      zones:
+        condition: service_healthy
+      reservations:
+        condition: service_healthy
+      payments:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  tsdata:

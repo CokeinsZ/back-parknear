@@ -1,0 +1,12 @@
+services:
+  service-bus:
+    build:
+      context: .
+      dockerfile: DOCKERFILE
+    container_name: parknear-service-bus
+    env_file: .env
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info

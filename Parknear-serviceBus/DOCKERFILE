@@ -1,0 +1,43 @@
+# ── Etapa 1: build ──────────────────────────────────────────────────────────
+FROM rust AS builder
+
+# Dependencias del sistema necesarias para sqlx (OpenSSL y libpq)
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+ARG APP_BIN=Parknear-serviceBus
+
+COPY Cargo.toml Cargo.lock* ./
+COPY src ./src
+RUN cargo build --release --locked --bin ${APP_BIN}
+
+# ── Etapa 2: runtime ─────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+ARG APP_BIN=Parknear-serviceBus
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    libssl3 \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copiar solo el binario compilado
+COPY --from=builder /app/target/release/${APP_BIN} ./service-bus
+RUN test -x ./service-bus
+
+# Usuario sin privilegios para mayor seguridad
+RUN useradd -ms /bin/bash appuser
+USER appuser
+
+EXPOSE 3000
+
+CMD ["./service-bus"]
