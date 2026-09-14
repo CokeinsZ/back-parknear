@@ -1,6 +1,16 @@
-import { Controller, Get, Post, Body, Param, UseGuards, Patch } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { UsersService } from './users.service';
 import { CreateUserDto } from './dto/create-user.dto';
+import { UpdateVehiculoDto } from './dto/add-vehiculo.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { Roles } from './roles.decorator';
 import { RolesGuard } from './guards/roles.guard';
@@ -40,6 +50,27 @@ export class UsersController {
   @Get(':documento/vehiculos')
   getVehiculos(@Param('documento') documento: string) {
     return this.usersService.getVehiculos(documento);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN', 'CONDUCTOR')
+  @Patch(':documento/vehiculo/:placa')
+  updateVehiculo(
+    @Param('documento') documento: string,
+    @Param('placa') placa: string,
+    @Body() vehiculoDto: UpdateVehiculoDto,
+  ) {
+    return this.usersService.updateVehiculo(documento, placa, vehiculoDto);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN', 'CONDUCTOR')
+  @Delete(':documento/vehiculo/:placa')
+  deleteVehiculo(
+    @Param('documento') documento: string,
+    @Param('placa') placa: string,
+  ) {
+    return this.usersService.deleteVehiculo(documento, placa);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)

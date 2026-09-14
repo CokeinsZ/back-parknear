@@ -7,7 +7,10 @@ import {
 } from '@nestjs/common';
 import { hash } from 'bcryptjs';
 import { CreateUserDto } from './dto/create-user.dto';
-import { AddVehiculoDto } from './dto/add-vehiculo.dto';
+import {
+  AddVehiculoDto,
+  UpdateVehiculoDto,
+} from './dto/add-vehiculo.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import {
   UpdateUsuarioFields,
@@ -90,6 +93,52 @@ export class UsersService {
     }
 
     return this.usersRepository.findVehiculosByConductorId(user.id);
+  }
+
+  async updateVehiculo(
+    documento: string,
+    placa: string,
+    vehiculoDto: UpdateVehiculoDto,
+  ) {
+    const user = await this.usersRepository.findByDocumento(documento);
+
+    if (!user) {
+      throw new NotFoundException('Usuario no encontrado');
+    }
+
+    const updated = await this.usersRepository.updateVehiculo(
+      user.id,
+      placa,
+      vehiculoDto,
+    );
+
+    if (!updated) {
+      throw new NotFoundException('Vehículo no encontrado');
+    }
+
+    return updated;
+  }
+
+  async deleteVehiculo(documento: string, placa: string) {
+    const user = await this.usersRepository.findByDocumento(documento);
+
+    if (!user) {
+      throw new NotFoundException('Usuario no encontrado');
+    }
+
+    if (user.tipo_usuario !== 'conductor') {
+      throw new BadRequestException(
+        'Solo los conductores pueden eliminar vehículos',
+      );
+    }
+
+    const deleted = await this.usersRepository.deleteVehiculo(user.id, placa);
+
+    if (!deleted) {
+      throw new NotFoundException('Vehículo no encontrado');
+    }
+
+    return { message: 'Vehículo eliminado correctamente' };
   }
 
   async update(documento: string, updateDto: UpdateUserDto) {

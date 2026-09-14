@@ -3,3 +3,8 @@ export class AddVehiculoDto {
   color!: string;
   marca!: string;
 }
+
+export class UpdateVehiculoDto {
+  color?: string;
+  marca?: string;
+}
