@@ -40,7 +40,7 @@ services:
     build: ./parknear-auth-service
     environment:
       PORT: 3000
-      DATABASE_URL: postgresql://neondb_owner:npg_LMIC8bcWwK6m@ep-rapid-water-a5xnfsgd-pooler.us-east-2.aws.neon.tech/zoneup?sslmode=require&channel_binding=require
+      DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET:-secretKey}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
     ports:
@@ -60,7 +60,7 @@ services:
     build: ./parknear-users-service
     environment:
       PORT: 3001
-      DATABASE_URL: postgresql://neondb_owner:npg_LMIC8bcWwK6m@ep-rapid-water-a5xnfsgd-pooler.us-east-2.aws.neon.tech/zoneup?sslmode=require&channel_binding=require
+      DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET:-secretKey}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
     ports:
@@ -80,7 +80,7 @@ services:
     build: ./parknear-zones-service
     environment:
       PORT: 3002
-      DATABASE_URL: postgresql://neondb_owner:npg_LMIC8bcWwK6m@ep-rapid-water-a5xnfsgd-pooler.us-east-2.aws.neon.tech/zoneup?sslmode=require&channel_binding=require
+      DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET:-secretKey}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
     ports:
@@ -100,7 +100,7 @@ services:
     build: ./parknear-reservations-service
     environment:
       PORT: 3004
-      DATABASE_URL: postgresql://neondb_owner:npg_LMIC8bcWwK6m@ep-rapid-water-a5xnfsgd-pooler.us-east-2.aws.neon.tech/zoneup?sslmode=require&channel_binding=require
+      DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET:-secretKey}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
     ports:
@@ -120,7 +120,7 @@ services:
     build: ./parknear-payments-service
     environment:
       PORT: 3005
-      DATABASE_URL: postgresql://neondb_owner:npg_LMIC8bcWwK6m@ep-rapid-water-a5xnfsgd-pooler.us-east-2.aws.neon.tech/zoneup?sslmode=require&channel_binding=require
+      DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET:-secretKey}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
       MERCADOPAGO_ACCESS_TOKEN: ${MERCADOPAGO_ACCESS_TOKEN:-}

@@ -43,7 +43,7 @@ export class UsersController {
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('ADMIN')
+  @Roles('ADMIN', 'CONDUCTOR')
   @Patch(':documento') update(@Param('documento') documento: string,@Body() updateDto: any) {
     return this.usersService.update(documento, updateDto);
   }
