@@ -30,8 +30,12 @@ export class AuthService {
     const hashedPassword = await hash(registerDto.contrasena, 10);
 
     try {
+      // El registro es público: siempre crea conductores. Antes se respetaba el
+      // `tipo_usuario` del cuerpo y cualquiera podía registrarse como admin.
+      // Los demás tipos los asigna un administrador (PATCH /users/:documento).
       const user = await this.usersRepository.create({
         ...registerDto,
+        tipo_usuario: 'conductor',
         contrasena: hashedPassword,
       });
 

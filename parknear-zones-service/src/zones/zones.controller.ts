@@ -1,4 +1,5 @@
-import { Controller, Get, Post, Body, Param, Patch, Delete, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Patch, Delete, Query, UseGuards } from '@nestjs/common';
+import { leerPaginacion } from 'src/common/busqueda';
 import { ZonasService } from './zones.service';
 import { CreateZonaDto } from './dto/create-zone.dto';
 import { UpdateZonaDto } from './dto/update-zone.dto';
@@ -17,9 +18,25 @@ export class ZonasController {
     return this.zonasService.create(createZonaDto);
   }
 
+  /** GET /zonas?q=texto&orden=disponibles&limit=20&offset=0 -> { items, total, limit, offset } */
   @Get()
-  findAll() {
-    return this.zonasService.findAll();
+  search(
+    @Query('q') q?: string,
+    @Query('orden') orden?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    return this.zonasService.search(
+      q,
+      orden === 'disponibles' ? 'disponibles' : 'id',
+      leerPaginacion(limit, offset),
+    );
+  }
+
+  /** GET /zonas/resumen -> { total, con_cupo, cupos_disponibles }. Va antes de `:id`. */
+  @Get('resumen')
+  resumen() {
+    return this.zonasService.resumen();
   }
 
   @Get(':id')

@@ -1,10 +1,25 @@
 import { Injectable } from '@nestjs/common';
 import { ConflictException } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { and, eq, getTableColumns, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 import { DrizzleService } from 'src/database/drizzle.service';
 import { EstadoUsuario, admin, conductores, controladores, usuarios } from 'src/database/schema';
 
 export type TipoUsuario = 'conductor' | 'controlador' | 'admin' | null;
+
+/**
+ * Un usuario es de un tipo si tiene fila en esa tabla y la fila no está
+ * marcada 'eliminado' (así queda el tipo anterior cuando un admin lo cambia).
+ * Mismo criterio que users-service: si cambia aquí, cambia allá.
+ */
+function tipoVigente(estado: AnyColumn): SQL {
+  return sql`${estado} is distinct from 'eliminado'`;
+}
+
+const tipoUsuarioSql = sql<TipoUsuario>`case
+  when ${conductores.id} is not null then 'conductor'
+  when ${controladores.id} is not null then 'controlador'
+  when ${admin.id} is not null then 'admin'
+end`;
 
 export interface AuthUserRecord {
   id: string;
@@ -131,52 +146,23 @@ export class UsersRepository {
     return false;
   }
 
+  /** El usuario con su `tipo_usuario` vigente, resuelto en una sola consulta. */
   async findByEmail(email: string): Promise<AuthUserRecord | null> {
     const [usuario] = await this.drizzleService.db
-      .select()
+      .select({ ...getTableColumns(usuarios), tipo_usuario: tipoUsuarioSql })
       .from(usuarios)
-      .where(eq(usuarios.email, email));
+      .leftJoin(
+        conductores,
+        and(eq(conductores.id, usuarios.id), tipoVigente(conductores.estado)),
+      )
+      .leftJoin(
+        controladores,
+        and(eq(controladores.id, usuarios.id), tipoVigente(controladores.estado)),
+      )
+      .leftJoin(admin, and(eq(admin.id, usuarios.id), tipoVigente(admin.estado)))
+      .where(eq(usuarios.email, email))
+      .limit(1);
 
-    if (!usuario) {
-      return null;
-    }
-
-    const tipo_usuario = await this.resolveTipoUsuario(usuario.id);
-
-    return {
-      ...usuario,
-      tipo_usuario,
-    };
-  }
-
-  private async resolveTipoUsuario(userId: string): Promise<TipoUsuario> {
-    const [conductor] = await this.drizzleService.db
-      .select({ id: conductores.id })
-      .from(conductores)
-      .where(eq(conductores.id, userId));
-
-    if (conductor) {
-      return 'conductor';
-    }
-
-    const [controlador] = await this.drizzleService.db
-      .select({ id: controladores.id })
-      .from(controladores)
-      .where(eq(controladores.id, userId));
-
-    if (controlador) {
-      return 'controlador';
-    }
-
-    const [adminUser] = await this.drizzleService.db
-      .select({ id: admin.id })
-      .from(admin)
-      .where(eq(admin.id, userId));
-
-    if (adminUser) {
-      return 'admin';
-    }
-
-    return null;
+    return usuario ?? null;
   }
 }

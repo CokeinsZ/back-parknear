@@ -1,11 +1,18 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
 import { hash } from 'bcryptjs';
+import {
+  normalizarBusqueda,
+  type Pagina,
+  type Paginacion,
+} from 'src/common/busqueda';
+import { estadoUsuarioEnum } from 'src/database/schema';
 import { CreateUserDto } from './dto/create-user.dto';
 import {
   AddVehiculoDto,
@@ -13,10 +20,19 @@ import {
 } from './dto/add-vehiculo.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import {
+  TipoAsignable,
   UpdateUsuarioFields,
   UserRecord,
   UsersRepository,
 } from './repositories/users.repository';
+
+const TIPOS_ASIGNABLES: readonly TipoAsignable[] = ['conductor', 'controlador', 'admin'];
+
+/** Quién hace la petición, según su token (ver JwtStrategy). */
+export interface Solicitante {
+  id: string;
+  tipo_usuario: string | null;
+}
 
 @Injectable()
 export class UsersService {
@@ -42,9 +58,21 @@ export class UsersService {
     }
   }
 
-  async findAll() {
-    const users = await this.usersRepository.findAll();
-    return users.map((user) => this.sanitizeUser(user));
+  /** Búsqueda paginada en la base de datos: nunca devuelve la tabla completa. */
+  async search(
+    q: string | undefined,
+    paginacion: Paginacion,
+  ): Promise<Pagina<ReturnType<UsersService['sanitizeUser']>>> {
+    const { items, total } = await this.usersRepository.search(
+      normalizarBusqueda(q),
+      paginacion,
+    );
+
+    return { items: items.map((user) => this.sanitizeUser(user)), total, ...paginacion };
+  }
+
+  resumen() {
+    return this.usersRepository.resumen();
   }
 
   async findByEmail(email: string) {
@@ -141,12 +169,14 @@ export class UsersService {
     return { message: 'Vehículo eliminado correctamente' };
   }
 
-  async update(documento: string, updateDto: UpdateUserDto) {
+  async update(documento: string, updateDto: UpdateUserDto, solicitante: Solicitante) {
     const existing = await this.usersRepository.findByDocumento(documento);
 
     if (!existing) {
       throw new NotFoundException('Usuario no encontrado');
     }
+
+    this.validarPermisosDeEdicion(existing, updateDto, solicitante);
 
     const fields = await this.buildUpdateFields(updateDto);
 
@@ -160,6 +190,44 @@ export class UsersService {
     }
 
     return this.sanitizeUser(updated);
+  }
+
+  /**
+   * Un conductor solo edita su propia cuenta y nunca su tipo ni su estado:
+   * antes cualquiera con token de conductor podía volverse admin.
+   * Un admin puede cambiar el tipo de cualquiera menos el suyo, para no
+   * quedarse sin acceso al panel por error.
+   */
+  private validarPermisosDeEdicion(
+    existing: UserRecord,
+    updateDto: UpdateUserDto,
+    solicitante: Solicitante,
+  ) {
+    const esAdmin = solicitante.tipo_usuario === 'admin';
+    const cambiaTipo = updateDto.tipo_usuario !== undefined;
+    const cambiaEstado = updateDto.estado !== undefined;
+
+    if (!esAdmin && existing.id !== solicitante.id) {
+      throw new ForbiddenException('Solo puedes modificar tu propia cuenta');
+    }
+    if (!esAdmin && (cambiaTipo || cambiaEstado)) {
+      throw new ForbiddenException(
+        'Solo un administrador puede cambiar el tipo o el estado de una cuenta',
+      );
+    }
+    if (cambiaTipo && !TIPOS_ASIGNABLES.includes(updateDto.tipo_usuario as TipoAsignable)) {
+      throw new BadRequestException(
+        `Tipo de usuario inválido. Usa: ${TIPOS_ASIGNABLES.join(', ')}`,
+      );
+    }
+    if (cambiaTipo && existing.id === solicitante.id && updateDto.tipo_usuario !== existing.tipo_usuario) {
+      throw new BadRequestException('No puedes cambiar tu propio tipo de usuario');
+    }
+    if (cambiaEstado && !estadoUsuarioEnum.enumValues.includes(updateDto.estado!)) {
+      throw new BadRequestException(
+        `Estado inválido. Usa: ${estadoUsuarioEnum.enumValues.join(', ')}`,
+      );
+    }
   }
 
   private async buildUpdateFields(

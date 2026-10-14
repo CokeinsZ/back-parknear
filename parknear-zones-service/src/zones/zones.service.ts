@@ -3,7 +3,19 @@ import { CreateZonaDto } from './dto/create-zone.dto';
 import { UpdateZonaDto } from './dto/update-zone.dto';
 import { DrizzleService } from 'src/database/drizzle.service';
 import { zonas_azules } from 'src/database/schema';
-import { eq } from 'drizzle-orm';
+import { asc, count, eq, or, sql, type SQL } from 'drizzle-orm';
+import {
+  normalizarBusqueda,
+  patronContiene,
+  sinTildes,
+  type Pagina,
+  type Paginacion,
+} from 'src/common/busqueda';
+
+type Zona = typeof zonas_azules.$inferSelect;
+
+/** `id`: por número de zona. `disponibles`: primero las que tienen cupo (para reservar). */
+export type OrdenZonas = 'id' | 'disponibles';
 
 @Injectable()
 export class ZonasService {
@@ -27,8 +39,50 @@ export class ZonasService {
     return zona;
   }
 
-  async findAll() {
-    return this.drizzleService.db.select().from(zonas_azules);
+  /**
+   * Una página de zonas. `q` busca en las indicaciones sin distinguir tildes ni
+   * mayúsculas; si es un número ("12", "#12" o "zona 12") también trae esa zona.
+   */
+  async search(q: string | undefined, orden: OrdenZonas, { limit, offset }: Paginacion): Promise<Pagina<Zona>> {
+    const busqueda = normalizarBusqueda(q);
+    const filtro = busqueda ? this.filtroBusqueda(busqueda) : undefined;
+    const ordenamiento =
+      orden === 'disponibles'
+        ? [sql`(${zonas_azules.capacidad} > 0) desc`, asc(zonas_azules.id)]
+        : [asc(zonas_azules.id)];
+
+    const [items, [conteo]] = await Promise.all([
+      this.drizzleService.db
+        .select()
+        .from(zonas_azules)
+        .where(filtro)
+        .orderBy(...ordenamiento)
+        .limit(limit)
+        .offset(offset),
+      this.drizzleService.db.select({ total: count() }).from(zonas_azules).where(filtro),
+    ]);
+
+    return { items, total: conteo?.total ?? 0, limit, offset };
+  }
+
+  private filtroBusqueda(busqueda: string): SQL | undefined {
+    const porIndicaciones = sql`${sinTildes(zonas_azules.indicaciones)} like ${patronContiene(busqueda)}`;
+    const numero = /^(?:zona\s*)?#?\s*(\d{1,9})$/.exec(busqueda)?.[1];
+
+    return numero ? or(eq(zonas_azules.id, Number(numero)), porIndicaciones) : porIndicaciones;
+  }
+
+  /** Totales para las tarjetas de las pantallas, calculados en la base de datos. */
+  async resumen(): Promise<{ total: number; con_cupo: number; cupos_disponibles: number }> {
+    const [fila] = await this.drizzleService.db
+      .select({
+        total: count(),
+        con_cupo: sql<number>`count(*) filter (where ${zonas_azules.capacidad} > 0)`.mapWith(Number),
+        cupos_disponibles: sql<number>`coalesce(sum(greatest(${zonas_azules.capacidad}, 0)), 0)`.mapWith(Number),
+      })
+      .from(zonas_azules);
+
+    return fila ?? { total: 0, con_cupo: 0, cupos_disponibles: 0 };
   }
 
   async findOne(id: number) {

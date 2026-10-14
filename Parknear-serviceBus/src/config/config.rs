@@ -13,6 +13,9 @@ pub struct AppConfig {
     pub bind_addr: String,
     pub max_db_connections: u32,
     pub request_body_limit: usize,
+    /// Orígenes que el navegador puede usar para llamar al gateway (CORS).
+    /// Vacío o `*` = cualquiera.
+    pub cors_allowed_origins: Vec<String>,
     pub auth: ServiceTarget,
     pub users: ServiceTarget,
     pub zones: ServiceTarget,
@@ -41,6 +44,13 @@ impl AppConfig {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(16 * 1024 * 1024),
+                // Separados por coma, ej: "https://app.zoneup.online,http://localhost:8081".
+                cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|origen| origen.trim().trim_end_matches('/').to_string())
+                    .filter(|origen| !origen.is_empty())
+                    .collect(),
                 auth: ServiceTarget {
                     name: env::var("AUTH_SERVICE_NAME")
                         .unwrap_or_else(|_| "auth_service".to_string()),

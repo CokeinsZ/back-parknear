@@ -16,6 +16,7 @@ use crate::config::AppConfig;
 use crate::middleware::blacklist::blacklist_middleware;
 use crate::middleware::blacklist::IpBlacklist;
 use crate::middleware::correlation::correlation_middleware;
+use crate::middleware::cors::cors_layer;
 use crate::middleware::rate_limit::RateLimiter;
 use crate::middleware::rate_limit::rate_limit_middleware;
 use crate::proxy::router::{health_handler, reverse_proxy_handler, AppState};
@@ -58,6 +59,7 @@ async fn main() {
     let ip_blacklist = IpBlacklist::new();
 
     let bind_addr = state.config.bind_addr.clone();
+    let cors = cors_layer(&state.config.cors_allowed_origins);
 
     let app = Router::new()
         .route("/health", get(health_handler))
@@ -67,6 +69,10 @@ async fn main() {
         .layer(axum::Extension(rate_limiter))
         .layer(axum::Extension(ip_blacklist))
         .layer(from_fn(correlation_middleware))
+        // Por fuera del rate limit y la blacklist: los preflight se responden
+        // sin llegar a los servicios, y los 429/403 también llevan los headers
+        // CORS para que el navegador deje leerlos en vez de mostrar un error de CORS.
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

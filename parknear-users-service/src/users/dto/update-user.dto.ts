@@ -9,5 +9,5 @@ export class UpdateUserDto {
   contrasena?: string;
   celular?: string;
   estado?: EstadoUsuario;
-  tipo_usuario?: 'conductor' | 'controlador';
+  tipo_usuario?: 'conductor' | 'controlador' | 'admin';
 }

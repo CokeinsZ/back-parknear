@@ -6,9 +6,12 @@ import {
   Param,
   Patch,
   Post,
+  Query,
+  Request,
   UseGuards,
 } from '@nestjs/common';
-import { UsersService } from './users.service';
+import { leerPaginacion } from 'src/common/busqueda';
+import { Solicitante, UsersService } from './users.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateVehiculoDto } from './dto/add-vehiculo.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
@@ -19,16 +22,33 @@ import { RolesGuard } from './guards/roles.guard';
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
+  // Solo un admin crea usuarios desde aquí (con el tipo que elija). El registro
+  // público es POST /auth/register, que siempre crea conductores.
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN')
   @Post()
   async create(@Body() createUserDto: CreateUserDto) {
     return this.usersService.create(createUserDto);
   }
 
+  /** GET /users?q=texto&limit=20&offset=0 -> { items, total, limit, offset } */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('ADMIN')
   @Get()
-  async findAll() {
-    return this.usersService.findAll();
+  async search(
+    @Query('q') q?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    return this.usersService.search(q, leerPaginacion(limit, offset));
+  }
+
+  /** GET /users/resumen -> { total, activos }. Va antes de `:email` para que no lo capture. */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN')
+  @Get('resumen')
+  async resumen() {
+    return this.usersService.resumen();
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -75,7 +95,12 @@ export class UsersController {
 
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('ADMIN', 'CONDUCTOR')
-  @Patch(':documento') update(@Param('documento') documento: string,@Body() updateDto: any) {
-    return this.usersService.update(documento, updateDto);
+  @Patch(':documento')
+  update(
+    @Param('documento') documento: string,
+    @Body() updateDto: any,
+    @Request() req: { user: Solicitante },
+  ) {
+    return this.usersService.update(documento, updateDto, req.user);
   }
 }

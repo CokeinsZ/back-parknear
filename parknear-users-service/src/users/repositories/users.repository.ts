@@ -1,5 +1,20 @@
 import { ConflictException, Injectable } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import {
+  and,
+  count,
+  desc,
+  eq,
+  getTableColumns,
+  or,
+  sql,
+  type AnyColumn,
+  type SQL,
+} from 'drizzle-orm';
+import {
+  patronContiene,
+  sinTildes,
+  type Paginacion,
+} from 'src/common/busqueda';
 import { DrizzleService } from 'src/database/drizzle.service';
 import {
   EstadoUsuario,
@@ -11,6 +26,29 @@ import {
 } from 'src/database/schema';
 
 export type TipoUsuario = 'conductor' | 'controlador' | 'admin' | null;
+export type TipoAsignable = Exclude<TipoUsuario, null>;
+
+type Db = DrizzleService['db'];
+
+/**
+ * Un usuario es de un tipo si tiene fila en esa tabla (`conductores`,
+ * `controladores` o `admin`) y la fila no está marcada 'eliminado'.
+ *
+ * Al cambiar el tipo, la fila del tipo anterior NO se borra: vehículos,
+ * reservas y pagos apuntan a `conductores` con ON DELETE RESTRICT y se
+ * perdería el historial. Se marca 'eliminado' y deja de contar.
+ * auth-service usa exactamente el mismo criterio al iniciar sesión.
+ */
+function tipoVigente(estado: AnyColumn): SQL {
+  return sql`${estado} is distinct from 'eliminado'`;
+}
+
+/** Si por datos viejos quedara más de un tipo vigente, gana el mismo orden que siempre. */
+const tipoUsuarioSql = sql<TipoUsuario>`case
+  when ${conductores.id} is not null then 'conductor'
+  when ${controladores.id} is not null then 'controlador'
+  when ${admin.id} is not null then 'admin'
+end`;
 
 export interface UserRecord {
   id: string;
@@ -57,12 +95,33 @@ export interface UpdateUsuarioFields {
   contrasena?: string;
   celular?: string;
   estado?: EstadoUsuario;
-  tipo_usuario?: 'conductor' | 'controlador' | 'admin';
+  tipo_usuario?: TipoAsignable;
 }
 
 @Injectable()
 export class UsersRepository {
   constructor(private readonly drizzleService: DrizzleService) {}
+
+  private get db(): Db {
+    return this.drizzleService.db;
+  }
+
+  /** `usuarios` con su `tipo_usuario` resuelto en la misma consulta (sin una consulta por usuario). */
+  private consultaUsuarios(db: Db = this.db) {
+    return db
+      .select({ ...getTableColumns(usuarios), tipo_usuario: tipoUsuarioSql })
+      .from(usuarios)
+      .leftJoin(
+        conductores,
+        and(eq(conductores.id, usuarios.id), tipoVigente(conductores.estado)),
+      )
+      .leftJoin(
+        controladores,
+        and(eq(controladores.id, usuarios.id), tipoVigente(controladores.estado)),
+      )
+      .leftJoin(admin, and(eq(admin.id, usuarios.id), tipoVigente(admin.estado)))
+      .$dynamic();
+  }
 
   async create(input: CreateUserInput): Promise<UserRecord> {
     const estado = input.estado ?? 'inactivo';
@@ -155,53 +214,67 @@ export class UsersRepository {
     return false;
   }
 
-  async findAll(): Promise<UserRecord[]> {
-    const allUsers = await this.drizzleService.db.select().from(usuarios);
+  /**
+   * Una página de usuarios, los más recientes primero. `busqueda` (ya
+   * normalizada) se compara con el nombre completo, el correo y el documento.
+   */
+  async search(
+    busqueda: string | null,
+    { limit, offset }: Paginacion,
+  ): Promise<{ items: UserRecord[]; total: number }> {
+    const filtro = busqueda ? this.filtroBusqueda(busqueda) : undefined;
 
-    const usersWithRole = await Promise.all(
-      allUsers.map(async (usuario) => ({
-        ...usuario,
-        tipo_usuario: await this.resolveTipoUsuario(usuario.id),
-      })),
+    const [items, [conteo]] = await Promise.all([
+      this.consultaUsuarios()
+        .where(filtro)
+        .orderBy(desc(usuarios.fecha_creacion), desc(usuarios.id))
+        .limit(limit)
+        .offset(offset),
+      this.db.select({ total: count() }).from(usuarios).where(filtro),
+    ]);
+
+    return { items, total: conteo?.total ?? 0 };
+  }
+
+  private filtroBusqueda(busqueda: string): SQL | undefined {
+    const patron = patronContiene(busqueda);
+    const nombreCompleto = sql`concat_ws(' ', ${usuarios.primer_nombre}, ${usuarios.segundo_nombre}, ${usuarios.primer_apellido}, ${usuarios.segundo_apellido})`;
+
+    return or(
+      sql`${sinTildes(nombreCompleto)} like ${patron}`,
+      sql`${sinTildes(usuarios.email)} like ${patron}`,
+      sql`${usuarios.documento_identidad} like ${patron}`,
     );
+  }
 
-    return usersWithRole;
+  /** Totales para las tarjetas del panel, calculados en la base de datos. */
+  async resumen(): Promise<{ total: number; activos: number }> {
+    const [fila] = await this.db
+      .select({
+        total: count(),
+        activos: sql<number>`count(*) filter (where ${usuarios.estado} = 'activo')`.mapWith(
+          Number,
+        ),
+      })
+      .from(usuarios);
+
+    return fila ?? { total: 0, activos: 0 };
   }
 
   async findByEmail(email: string): Promise<UserRecord | null> {
-    const [usuario] = await this.drizzleService.db
-      .select()
-      .from(usuarios)
-      .where(eq(usuarios.email, email));
+    const [usuario] = await this.consultaUsuarios()
+      .where(eq(usuarios.email, email))
+      .limit(1);
 
-    if (!usuario) {
-      return null;
-    }
-
-    const tipo_usuario = await this.resolveTipoUsuario(usuario.id);
-
-    return {
-      ...usuario,
-      tipo_usuario,
-    };
+    return usuario ?? null;
   }
 
   async findByDocumento(documento: string): Promise<UserRecord | null> {
-    const [usuario] = await this.drizzleService.db
-      .select()
-      .from(usuarios)
-      .where(eq(usuarios.documento_identidad, documento));
+    const [usuario] = await this.consultaUsuarios()
+      .where(eq(usuarios.documento_identidad, documento))
+      .limit(1);
 
-    if (!usuario) {
-      return null;
-    }
-
-    const tipo_usuario = await this.resolveTipoUsuario(usuario.id);
-
-    return {
-      ...usuario,
-      tipo_usuario,
-    };
+    return usuario ?? null;
   }
 
   async insertVehiculoForConductor(
@@ -351,7 +424,8 @@ export class UsersRepository {
 
     try {
       await this.drizzleService.db.transaction(async (tx) => {
-        if (Object.keys(usuarioUpdate).length > 0) {
+        // Cambiar solo el tipo también cuenta como actualización del usuario.
+        if (Object.keys(usuarioUpdate).length > 0 || tipo_usuario !== undefined) {
           await tx
             .update(usuarios)
             .set({
@@ -361,40 +435,8 @@ export class UsersRepository {
             .where(eq(usuarios.documento_identidad, documento));
         }
 
-        const [fresh] = await tx
-          .select()
-          .from(usuarios)
-          .where(eq(usuarios.documento_identidad, documento));
-
-        if (!fresh) {
-          return;
-        }
-
-        const currentTipo = await this.resolveTipoUsuarioWithDb(
-          tx as unknown as typeof this.drizzleService.db,
-          fresh.id,
-        );
-
-        if (tipo_usuario !== undefined && tipo_usuario !== currentTipo) {
-          if (currentTipo !== null) {
-            throw new ConflictException('El tipo de usuario ya está asignado');
-          }
-          if (tipo_usuario === 'conductor') {
-            await tx.insert(conductores).values({
-              id: fresh.id,
-              estado: fresh.estado,
-            });
-          } else if (tipo_usuario === 'controlador') {
-            await tx.insert(controladores).values({
-              id: fresh.id,
-              estado: fresh.estado,
-            });
-          } else if (tipo_usuario === 'admin') {
-            await tx.insert(admin).values({
-              id: fresh.id,
-              estado: 'activo',
-            });
-          }
+        if (tipo_usuario !== undefined) {
+          await this.asignarTipo(tx as unknown as Db, existing.id, tipo_usuario);
         }
       });
     } catch (error: unknown) {
@@ -412,41 +454,47 @@ export class UsersRepository {
     return this.findByDocumento(documento);
   }
 
-  private async resolveTipoUsuario(userId: string): Promise<TipoUsuario> {
-    return this.resolveTipoUsuarioWithDb(this.drizzleService.db, userId);
-  }
-
-  private async resolveTipoUsuarioWithDb(
-    db: typeof this.drizzleService.db,
-    userId: string,
-  ): Promise<TipoUsuario> {
-    const [conductor] = await db
-      .select({ id: conductores.id })
-      .from(conductores)
-      .where(eq(conductores.id, userId));
-
-    if (conductor) {
-      return 'conductor';
+  /**
+   * Deja al usuario con un solo tipo vigente: marca 'eliminado' la fila de los
+   * otros tipos y crea (o reactiva, si ya la tuvo) la del tipo nuevo. Asignar el
+   * mismo tipo que ya tiene no cambia nada, salvo limpiar tipos duplicados de
+   * datos viejos. Va dentro de la transacción de `updateByDocumento`.
+   */
+  private async asignarTipo(tx: Db, id: string, tipo: TipoAsignable) {
+    if (tipo !== 'conductor') {
+      await tx
+        .update(conductores)
+        .set({ estado: 'eliminado' })
+        .where(and(eq(conductores.id, id), tipoVigente(conductores.estado)));
+    }
+    if (tipo !== 'controlador') {
+      await tx
+        .update(controladores)
+        .set({ estado: 'eliminado' })
+        .where(and(eq(controladores.id, id), tipoVigente(controladores.estado)));
+    }
+    if (tipo !== 'admin') {
+      await tx
+        .update(admin)
+        .set({ estado: 'eliminado' })
+        .where(and(eq(admin.id, id), tipoVigente(admin.estado)));
     }
 
-    const [controlador] = await db
-      .select({ id: controladores.id })
-      .from(controladores)
-      .where(eq(controladores.id, userId));
-
-    if (controlador) {
-      return 'controlador';
+    if (tipo === 'conductor') {
+      await tx
+        .insert(conductores)
+        .values({ id, estado: 'activo' })
+        .onConflictDoUpdate({ target: conductores.id, set: { estado: 'activo' } });
+    } else if (tipo === 'controlador') {
+      await tx
+        .insert(controladores)
+        .values({ id, estado: 'activo' })
+        .onConflictDoUpdate({ target: controladores.id, set: { estado: 'activo' } });
+    } else {
+      await tx
+        .insert(admin)
+        .values({ id, estado: 'activo' })
+        .onConflictDoUpdate({ target: admin.id, set: { estado: 'activo' } });
     }
-
-    const [adminUser] = await db
-      .select({ id: admin.id })
-      .from(admin)
-      .where(eq(admin.id, userId));
-
-    if (adminUser) {
-      return 'admin';
-    }
-
-    return null;
   }
 }

@@ -1,8 +1,21 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+	BadRequestException,
+	ForbiddenException,
+	Injectable,
+	NotFoundException,
+} from '@nestjs/common';
+import { normalizarBusqueda, type Paginacion } from 'src/common/busqueda';
+import { estadoReservaEnum } from 'src/database/schema';
 import { CreateReservaDto } from './dtos/create-reserva.dto';
 import { UpdateReservaStateDto } from './dtos/update-reserva-state.dto';
-import { ReservaRecord } from './interfaces/reserva.interface';
+import { EstadoReserva, ReservaRecord } from './interfaces/reserva.interface';
 import { ReservasRepository } from './repositories/reservas.repository';
+
+/** Quién hace la petición, según su token (ver JwtStrategy). */
+export interface Solicitante {
+	sub: string;
+	tipo_usuario: string | null;
+}
 
 @Injectable()
 export class ReservasService {
@@ -52,12 +65,56 @@ export class ReservasService {
 		return reserva;
 	}
 
-	async findByUserId(userId: string): Promise<ReservaRecord[]> {
-		return this.reservasRepository.findByUserId(userId);
+	/** Historial paginado de un conductor. Un conductor solo puede ver el suyo. */
+	async findByUserId(userId: string, solicitante: Solicitante, paginacion: Paginacion) {
+		this.validarDueno(userId, solicitante);
+		const { items, total } = await this.reservasRepository.findByUserId(userId, paginacion);
+		return { items, total, ...paginacion };
+	}
+
+	async resumenDeConductor(userId: string, solicitante: Solicitante) {
+		this.validarDueno(userId, solicitante);
+		return this.reservasRepository.resumen(userId);
+	}
+
+	async resumen() {
+		return this.reservasRepository.resumen();
+	}
+
+	/** Búsqueda paginada sobre las reservas de todas las zonas (para el encargado). */
+	async search(q: string | undefined, estado: string | undefined, paginacion: Paginacion) {
+		if (estado && !estadoReservaEnum.enumValues.includes(estado as EstadoReserva)) {
+			throw new BadRequestException(
+				`Estado inválido. Usa: ${estadoReservaEnum.enumValues.join(', ')}`,
+			);
+		}
+
+		const { items, total } = await this.reservasRepository.search(
+			normalizarBusqueda(q),
+			(estado as EstadoReserva | undefined) ?? null,
+			paginacion,
+		);
+		return { items, total, ...paginacion };
 	}
 
 	async findCompleteByZonaId(zonaId: number) {
 		return this.reservasRepository.findCompleteByZonaId(zonaId);
+	}
+
+	async findCompleteById(id: number) {
+		const fila = await this.reservasRepository.findCompleteById(id);
+
+		if (!fila) {
+			throw new NotFoundException('Reserva no encontrada');
+		}
+
+		return fila;
+	}
+
+	private validarDueno(userId: string, solicitante: Solicitante) {
+		if (solicitante.tipo_usuario !== 'admin' && solicitante.sub !== userId) {
+			throw new ForbiddenException('Solo puedes ver tus propias reservas');
+		}
 	}
 
 	async updateState(id: number, updateReservaStateDto: UpdateReservaStateDto): Promise<ReservaRecord> {
