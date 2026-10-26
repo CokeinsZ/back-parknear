@@ -1,225 +1,334 @@
 import {
-	BadRequestException,
-	ForbiddenException,
-	Injectable,
-	NotFoundException,
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
 } from '@nestjs/common';
 import { normalizarBusqueda, type Paginacion } from 'src/common/busqueda';
+import { errorDePostgres } from 'src/database/errores';
 import { estadoReservaEnum } from 'src/database/schema';
 import { CreateReservaDto } from './dtos/create-reserva.dto';
-import { UpdateReservaStateDto } from './dtos/update-reserva-state.dto';
+import type { EstadoDelEncargado } from './dtos/update-reserva-state.dto';
 import { EstadoReserva, ReservaRecord } from './interfaces/reserva.interface';
-import { ReservasRepository } from './repositories/reservas.repository';
+import {
+  ReservasRepository,
+  type ErrorAlCrear,
+  type ResultadoTransicion,
+} from './repositories/reservas.repository';
+import { HORAS_MAX, MINUTOS_PARA_LLEGAR } from './reglas';
 
 /** Quién hace la petición, según su token (ver JwtStrategy). */
 export interface Solicitante {
-	sub: string;
-	tipo_usuario: string | null;
+  sub: string;
+  tipo_usuario: string | null;
+}
+
+/*
+ * Errores con `codigo`, para que la app distinga el caso además de mostrar el mensaje.
+ * Todos responden { statusCode, error, codigo, message }.
+ */
+function conflicto(codigo: string, message: string) {
+  return new ConflictException({
+    statusCode: 409,
+    error: 'Conflict',
+    codigo,
+    message,
+  });
+}
+
+function prohibido(codigo: string, message: string) {
+  return new ForbiddenException({
+    statusCode: 403,
+    error: 'Forbidden',
+    codigo,
+    message,
+  });
+}
+
+function noEncontrado(codigo: string, message: string) {
+  return new NotFoundException({
+    statusCode: 404,
+    error: 'Not Found',
+    codigo,
+    message,
+  });
+}
+
+function invalido(codigo: string, message: string) {
+  return new BadRequestException({
+    statusCode: 400,
+    error: 'Bad Request',
+    codigo,
+    message,
+  });
+}
+
+const reservaNoExiste = () =>
+  noEncontrado('RESERVA_NO_EXISTE', 'Reserva no encontrada');
+
+const MS_PARA_LLEGAR = MINUTOS_PARA_LLEGAR * 60 * 1000;
+
+/**
+ * La reserva se canceló porque el conductor no llegó a tiempo: sin llegada y cancelada
+ * cuando ya habían pasado los 15 minutos (antes de eso, solo el encargado pudo cancelarla).
+ * Solo elige el mensaje de error.
+ */
+function vencioSinLlegar(reserva: ReservaRecord): boolean {
+  return (
+    reserva.estado === 'cancelada' &&
+    reserva.fecha_real_inicio === null &&
+    reserva.fecha_actualizacion.getTime() >=
+      reserva.fecha_creacion.getTime() + MS_PARA_LLEGAR
+  );
 }
 
 @Injectable()
 export class ReservasService {
-	constructor(private readonly reservasRepository: ReservasRepository) {}
+  constructor(private readonly reservasRepository: ReservasRepository) {}
 
-	private calcularPrecio(fechaInicio: Date, fechaFin: Date): number {
-		const diffMs = fechaFin.getTime() - fechaInicio.getTime();
-		const diffHours = Math.max(0, diffMs / (1000 * 60 * 60));
-		return Number((diffHours * 3500).toFixed(2)) + 5000; // Tarifa base de 5000 + 3500 por hora
-	}
+  /**
+   * Crea una reserva `pendiente` para el conductor del token. En una transacción revisa que
+   * el vehículo sea suyo, que no tenga otra reserva en curso y que la zona tenga cupo.
+   */
+  async create(
+    dto: CreateReservaDto,
+    solicitante: Solicitante,
+  ): Promise<ReservaRecord> {
+    const placa = dto.id_vehiculo.trim().toUpperCase();
+    const resultado = await this.reservasRepository
+      .crearConCupo({
+        idConductor: solicitante.sub,
+        idZona: dto.id_zona,
+        placa,
+        horas: dto.horas,
+      })
+      .catch((error: unknown) => this.handleDbError(error, placa));
 
-	async create(createReservaDto: CreateReservaDto): Promise<ReservaRecord> {
-		try {
-			const fechaInicio = new Date();
-			const fechaFin = new Date(createReservaDto.fecha_fin);
-			const precio = this.calcularPrecio(fechaInicio, fechaFin);
+    if (resultado.error) throw this.errorAlCrear(resultado.error, placa);
+    return resultado.reserva;
+  }
 
-			const reserva = await this.reservasRepository.create({
-					id_conductor: createReservaDto.id_conductor,
-					id_zona: createReservaDto.id_zona,
-					id_vehiculo: createReservaDto.id_vehiculo.toUpperCase(),
-					fecha_real_inicio: fechaInicio,
-					fecha_fin: fechaFin,
-					precio: precio.toString(),
-					estado: 'pendiente',
-				});
+  private errorAlCrear(error: ErrorAlCrear, placa: string) {
+    switch (error) {
+      case 'VEHICULO_AJENO':
+        return prohibido(
+          error,
+          `El vehículo ${placa} no está registrado a tu nombre.`,
+        );
+      case 'VEHICULO_CON_RESERVA':
+        return conflicto(
+          error,
+          `El vehículo ${placa} ya tiene una reserva en curso.`,
+        );
+      case 'ZONA_NO_EXISTE':
+        return noEncontrado(error, 'La zona no existe.');
+      case 'ZONA_SIN_CUPO':
+        return conflicto(error, 'La zona ya no tiene cupos disponibles.');
+    }
+  }
 
-			if (!reserva) {
-				throw new BadRequestException('No se pudo crear la reserva');
-			}
+  /** Una reserva. Un conductor solo puede ver las suyas. */
+  async findById(id: number, solicitante: Solicitante): Promise<ReservaRecord> {
+    const reserva = await this.reservasRepository.findById(id);
 
-			await this.reservasRepository.decrementCapacity(createReservaDto.id_zona);
+    if (!reserva) {
+      throw reservaNoExiste();
+    }
 
-			return reserva;
-		} catch (error: unknown) {
-			this.handleDbError(error);
-		}
-	}
+    this.validarDueno(reserva.id_conductor, solicitante);
+    return reserva;
+  }
 
-	async findById(id: number): Promise<ReservaRecord> {
-		const reserva = await this.reservasRepository.findById(id);
+  /**
+   * Historial paginado de un conductor. Un conductor solo puede ver el suyo.
+   * Con `soloEnCurso`, solo las reservas que ocupan un cupo ahora mismo.
+   */
+  async findByUserId(
+    userId: string,
+    solicitante: Solicitante,
+    paginacion: Paginacion,
+    soloEnCurso = false,
+  ) {
+    this.validarDueno(userId, solicitante);
+    const { items, total } = await this.reservasRepository.findByUserId(
+      userId,
+      paginacion,
+      soloEnCurso,
+    );
+    return { items, total, ...paginacion };
+  }
 
-		if (!reserva) {
-			throw new NotFoundException('Reserva no encontrada');
-		}
+  async resumenDeConductor(userId: string, solicitante: Solicitante) {
+    this.validarDueno(userId, solicitante);
+    return this.reservasRepository.resumen(userId);
+  }
 
-		return reserva;
-	}
+  async resumen() {
+    return this.reservasRepository.resumen();
+  }
 
-	/** Historial paginado de un conductor. Un conductor solo puede ver el suyo. */
-	async findByUserId(userId: string, solicitante: Solicitante, paginacion: Paginacion) {
-		this.validarDueno(userId, solicitante);
-		const { items, total } = await this.reservasRepository.findByUserId(userId, paginacion);
-		return { items, total, ...paginacion };
-	}
+  /** Búsqueda paginada sobre las reservas de todas las zonas (para el encargado). */
+  async search(
+    q: string | undefined,
+    estado: string | undefined,
+    paginacion: Paginacion,
+  ) {
+    if (
+      estado &&
+      !estadoReservaEnum.enumValues.includes(estado as EstadoReserva)
+    ) {
+      throw invalido(
+        'ESTADO_INVALIDO',
+        `Estado inválido. Usa: ${estadoReservaEnum.enumValues.join(', ')}`,
+      );
+    }
 
-	async resumenDeConductor(userId: string, solicitante: Solicitante) {
-		this.validarDueno(userId, solicitante);
-		return this.reservasRepository.resumen(userId);
-	}
+    const { items, total } = await this.reservasRepository.search(
+      normalizarBusqueda(q),
+      (estado as EstadoReserva | undefined) ?? null,
+      paginacion,
+    );
+    return { items, total, ...paginacion };
+  }
 
-	async resumen() {
-		return this.reservasRepository.resumen();
-	}
+  async findCompleteByZonaId(zonaId: number) {
+    return this.reservasRepository.findCompleteByZonaId(zonaId);
+  }
 
-	/** Búsqueda paginada sobre las reservas de todas las zonas (para el encargado). */
-	async search(q: string | undefined, estado: string | undefined, paginacion: Paginacion) {
-		if (estado && !estadoReservaEnum.enumValues.includes(estado as EstadoReserva)) {
-			throw new BadRequestException(
-				`Estado inválido. Usa: ${estadoReservaEnum.enumValues.join(', ')}`,
-			);
-		}
+  async findCompleteById(id: number) {
+    const fila = await this.reservasRepository.findCompleteById(id);
 
-		const { items, total } = await this.reservasRepository.search(
-			normalizarBusqueda(q),
-			(estado as EstadoReserva | undefined) ?? null,
-			paginacion,
-		);
-		return { items, total, ...paginacion };
-	}
+    if (!fila) {
+      throw reservaNoExiste();
+    }
 
-	async findCompleteByZonaId(zonaId: number) {
-		return this.reservasRepository.findCompleteByZonaId(zonaId);
-	}
+    return fila;
+  }
 
-	async findCompleteById(id: number) {
-		const fila = await this.reservasRepository.findCompleteById(id);
+  private validarDueno(idConductor: string | null, solicitante: Solicitante) {
+    if (
+      solicitante.tipo_usuario !== 'admin' &&
+      solicitante.sub !== idConductor
+    ) {
+      throw prohibido('RESERVA_AJENA', 'Solo puedes ver tus propias reservas');
+    }
+  }
 
-		if (!fila) {
-			throw new NotFoundException('Reserva no encontrada');
-		}
+  /**
+   * El encargado acepta (`pendiente` → `activa`) o rechaza/cancela (→ `cancelada`).
+   * No toca fechas. Cancelar sin llegada deja el precio en el cargo de reserva.
+   */
+  async updateState(
+    id: number,
+    estado: EstadoDelEncargado,
+  ): Promise<ReservaRecord> {
+    const { reserva, actual } = await this.reservasRepository.cambiarEstado(
+      id,
+      estado,
+    );
+    if (reserva) return reserva;
 
-		return fila;
-	}
+    throw this.transicionRechazada(actual);
+  }
 
-	private validarDueno(userId: string, solicitante: Solicitante) {
-		if (solicitante.tipo_usuario !== 'admin' && solicitante.sub !== userId) {
-			throw new ForbiddenException('Solo puedes ver tus propias reservas');
-		}
-	}
+  /** El encargado verificó la placa: registra la llegada. La reserva sigue `activa`. */
+  async confirmarLlegada(id: number): Promise<ReservaRecord> {
+    const { reserva, actual } =
+      await this.reservasRepository.confirmarLlegada(id);
+    if (reserva) return reserva;
 
-	async updateState(id: number, updateReservaStateDto: UpdateReservaStateDto): Promise<ReservaRecord> {
-		const existingReserva = await this.findById(id);
+    if (actual?.estado === 'pendiente') {
+      throw conflicto(
+        'RESERVA_NO_ACEPTADA',
+        'Primero acepta la reserva; luego confirma la llegada.',
+      );
+    }
+    if (actual?.estado === 'activa' && actual.fecha_real_inicio !== null) {
+      throw conflicto(
+        'LLEGADA_YA_CONFIRMADA',
+        'La llegada de esta reserva ya se confirmó.',
+      );
+    }
+    throw this.transicionRechazada(actual);
+  }
 
-		const shouldSetEndDate =
-			updateReservaStateDto.estado === 'completada' || updateReservaStateDto.estado === 'cancelada';
+  /** Por qué una transición con guarda no cambió la reserva (`actual` es cómo quedó). */
+  private transicionRechazada(actual: ResultadoTransicion['actual']) {
+    if (!actual) return reservaNoExiste();
+    if (vencioSinLlegar(actual)) {
+      return conflicto(
+        'LLEGADA_VENCIDA',
+        'El tiempo para llegar venció y la reserva se canceló.',
+      );
+    }
+    return conflicto(
+      'TRANSICION_INVALIDA',
+      `La reserva ya está ${actual.estado}.`,
+    );
+  }
 
-		let fechaInicio = existingReserva.fecha_real_inicio;
-		let fechaFin = existingReserva.fecha_fin;
+  /** El conductor dueño suma horas a su reserva en curso, sin pasar de HORAS_MAX desde la creación. */
+  async extendReserva(
+    id: number,
+    userId: string,
+    horas: number,
+  ): Promise<ReservaRecord> {
+    const { reserva, actual } = await this.reservasRepository.extender(
+      id,
+      userId,
+      horas,
+    );
+    if (reserva) return reserva;
 
-		if (existingReserva.estado === 'pendiente' && updateReservaStateDto.estado === 'activa') {
-			const now = new Date();
-			if (fechaFin) {
-				const durationMs = fechaFin.getTime() - existingReserva.fecha_real_inicio.getTime();
-				fechaInicio = now;
-				fechaFin = new Date(now.getTime() + durationMs);
-			} else {
-				fechaInicio = now;
-			}
-		}
+    if (!actual) throw reservaNoExiste();
+    if (actual.id_conductor !== userId) {
+      throw prohibido(
+        'RESERVA_AJENA',
+        'No tienes permiso para extender esta reserva',
+      );
+    }
+    if (actual.estado === 'completada' || actual.estado === 'cancelada') {
+      throw conflicto(
+        'RESERVA_TERMINADA',
+        'La reserva ya terminó; no se puede extender.',
+      );
+    }
+    throw invalido(
+      'DURACION_MAXIMA',
+      `Una reserva no puede durar más de ${HORAS_MAX} horas.`,
+    );
+  }
 
-		if (updateReservaStateDto.fecha_fin) {
-			fechaFin = new Date(updateReservaStateDto.fecha_fin);
-		} else if (shouldSetEndDate) {
-			fechaFin = new Date();
-		}
+  private handleDbError(error: unknown, placa: string): never {
+    const pg = errorDePostgres(error);
 
-		const calculatedPrice = this.calcularPrecio(fechaInicio, fechaFin ?? new Date());
-		// Nos aseguramos que el precio DB nunca baje de lo que el conductor ya tenía reservado inicialmente
-		// Esto evita conflictos donde un usuario "abandona" antes la reserva y su precio guardado cae bajo lo que ya pagó.
-		const nuevoPrecio = Math.max(Number(existingReserva.precio), calculatedPrice);
+    if (
+      pg.code === '23505' &&
+      pg.constraint_name === 'ux_reservas_vehiculo_en_curso'
+    ) {
+      // Red de seguridad del índice único: la transacción ya lo revisa antes de insertar.
+      throw conflicto(
+        'VEHICULO_CON_RESERVA',
+        `El vehículo ${placa} ya tiene una reserva en curso.`,
+      );
+    }
 
-		const updatedReserva = await this.reservasRepository.updateStateWithPrice(
-			id,
-			updateReservaStateDto.estado,
-			fechaFin,
-			fechaInicio,
-			nuevoPrecio.toString()
-		);
+    if (pg.code === '23505') {
+      throw conflicto('DUPLICADO', 'Ya existe un registro con esos datos.');
+    }
 
-		if (!updatedReserva) {
-			throw new NotFoundException('Reserva no encontrada');
-		}
+    if (pg.code === '23503') {
+      throw invalido(
+        'REFERENCIA_INVALIDA',
+        'No se pudo crear la reserva: conductor, vehiculo o zona no existe',
+      );
+    }
 
-		if (
-			(updateReservaStateDto.estado === 'completada' || updateReservaStateDto.estado === 'cancelada') &&
-			(existingReserva.estado !== 'completada' && existingReserva.estado !== 'cancelada')
-		) {
-			if (existingReserva.id_zona) {
-				await this.reservasRepository.incrementCapacity(existingReserva.id_zona);
-			}
-		}
+    if (pg.code === '22007') {
+      throw invalido('FECHA_INVALIDA', 'Formato de fecha invalido');
+    }
 
-		return updatedReserva;
-	}
-
-	async extendReserva(id: number, userId: string, fechaFinStr: string): Promise<ReservaRecord> {
-		const reserva = await this.findById(id);
-		
-		if (reserva.id_conductor !== userId) {
-			throw new BadRequestException('No tienes permiso para extender esta reserva');
-		}
-		if (reserva.estado === 'completada' || reserva.estado === 'cancelada') {
-			throw new BadRequestException('No se puede extender una reserva que ya finalizó');
-		}
-
-		const nuevaFechaFin = new Date(fechaFinStr);
-		if (reserva.fecha_fin && nuevaFechaFin <= reserva.fecha_fin) {
-			throw new BadRequestException('La nueva hora fin debe ser mayor a la actual');
-		}
-
-		const nuevoPrecio = this.calcularPrecio(reserva.fecha_real_inicio, nuevaFechaFin);
-		
-		const updatedReserva = await this.reservasRepository.updateStateWithPrice(
-			id,
-			reserva.estado,
-			nuevaFechaFin,
-			reserva.fecha_real_inicio,
-			nuevoPrecio.toString()
-		);
-
-		if (!updatedReserva) {
-			throw new NotFoundException('Reserva no encontrada');
-		}
-		
-		return updatedReserva;
-	}
-
-	private handleDbError(error: unknown): never {
-		const dbError = error as {
-			code?: string;
-			message?: string;
-		};
-
-		if (dbError?.code === '23503') {
-			throw new BadRequestException(
-				'No se pudo crear la reserva: conductor, vehiculo o zona no existe',
-			);
-		}
-
-		if (dbError?.code === '22007') {
-			throw new BadRequestException('Formato de fecha invalido');
-		}
-
-		throw error;
-	}
+    throw error;
+  }
 }

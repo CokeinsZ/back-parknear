@@ -102,7 +102,8 @@ export const reservas = pgTable('reservas', {
     onDelete: 'set null',
     onUpdate: 'cascade',
   }),
-  fecha_real_inicio: timestamp('fecha_real_inicio', { mode: 'date' }).notNull(),
+  /** Llegada confirmada por el encargado. null = no ha llegado. */
+  fecha_real_inicio: timestamp('fecha_real_inicio', { mode: 'date' }),
   fecha_fin: timestamp('fecha_fin', { mode: 'date' }),
   precio: decimal('precio', { precision: 7, scale: 2 }).notNull().default('0'),
   estado: estadoReservaEnum('estado').notNull().default('pendiente'),

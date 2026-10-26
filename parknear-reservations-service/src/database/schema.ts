@@ -5,6 +5,7 @@ import {
   jsonb,
   pgEnum,
   pgTable,
+  pgView,
   serial,
   text,
   timestamp,
@@ -102,10 +103,24 @@ export const reservas = pgTable('reservas', {
     onDelete: 'set null',
     onUpdate: 'cascade',
   }),
-  fecha_real_inicio: timestamp('fecha_real_inicio', { mode: 'date' }).notNull(),
+  /** Llegada confirmada por el encargado. null = no ha llegado. */
+  fecha_real_inicio: timestamp('fecha_real_inicio', { mode: 'date' }),
   fecha_fin: timestamp('fecha_fin', { mode: 'date' }),
   precio: decimal('precio', { precision: 7, scale: 2 }).notNull().default('0'),
   estado: estadoReservaEnum('estado').notNull().default('pendiente'),
   fecha_creacion: timestamp('fecha_creacion', { mode: 'date' }).notNull().defaultNow(),
   fecha_actualizacion: timestamp('fecha_actualizacion', { mode: 'date' }).notNull().defaultNow(),
 });
+
+/**
+ * Reservas que ocupan un cupo ahora mismo (vista de db/migrations/001_cupos_calculados.sql).
+ * Es la única definición de "en curso": en camino (sin llegada, dentro de los 15 minutos) o
+ * parqueada (con llegada, antes de `fecha_fin`). Solo lectura.
+ */
+export const reservasEnCurso = pgView('reservas_en_curso', {
+  id: integer('id').notNull(),
+  id_zona: integer('id_zona'),
+  id_vehiculo: varchar('id_vehiculo', { length: 10 }),
+  id_conductor: uuid('id_conductor'),
+  estado: estadoReservaEnum('estado').notNull(),
+}).existing(); // existing(): drizzle-kit no intenta crearla

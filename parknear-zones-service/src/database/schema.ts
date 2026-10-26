@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { integer, pgEnum, pgTable, timestamp, uuid, varchar, text, decimal, serial, date, time, primaryKey } from 'drizzle-orm/pg-core';
+import { integer, pgEnum, pgTable, pgView, timestamp, uuid, varchar, text, decimal, serial, date, time, primaryKey } from 'drizzle-orm/pg-core';
 
 export const estadoUsuarioEnum = pgEnum('estado_usuario', [
   'activo',
@@ -41,6 +41,7 @@ export const zonas_azules = pgTable('zonas_azules', {
   latitud: decimal('latitud', { precision: 9, scale: 6 }).notNull(),
   longitud: decimal('longitud', { precision: 9, scale: 6 }).notNull(),
   indicaciones: text('indicaciones'),
+  /** Contador viejo, SIN USO: los disponibles salen de `zonasConDisponibilidad`. Se borrará. */
   capacidad: integer('capacidad').notNull().default(0),
   capacidad_total: integer('capacidad_total').notNull().default(0),
 });
@@ -56,3 +57,24 @@ export const horario_zona = pgTable('horario_zona', {
     primaryKey({ columns: [table.id_zona, table.id_controlador, table.fecha] }),
   ];
 });
+
+/*
+ * Vistas de db/migrations/001_cupos_calculados.sql (solo lectura). existing(): drizzle-kit
+ * no intenta crearlas.
+ */
+
+/** Reservas que ocupan un cupo ahora mismo. Única definición de "en curso". */
+export const reservasEnCurso = pgView('reservas_en_curso', {
+  id: integer('id').notNull(),
+  id_zona: integer('id_zona'),
+}).existing();
+
+/** Las zonas con `capacidad` = cupos disponibles ahora (capacidad_total − reservas en curso). */
+export const zonasConDisponibilidad = pgView('zonas_con_disponibilidad', {
+  id: integer('id').notNull(),
+  latitud: decimal('latitud', { precision: 9, scale: 6 }).notNull(),
+  longitud: decimal('longitud', { precision: 9, scale: 6 }).notNull(),
+  indicaciones: text('indicaciones'),
+  capacidad_total: integer('capacidad_total').notNull(),
+  capacidad: integer('capacidad').notNull(),
+}).existing();
