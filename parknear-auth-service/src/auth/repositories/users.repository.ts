@@ -55,7 +55,7 @@ export class UsersRepository {
   constructor(private readonly drizzleService: DrizzleService) {}
 
   async create(input: CreateAuthUserInput): Promise<AuthUserRecord> {
-    const estado = input.estado ?? 'inactivo';
+    const estado = input.estado ?? 'activo';
 
     try {
       return await this.drizzleService.db.transaction(async (tx) => {
