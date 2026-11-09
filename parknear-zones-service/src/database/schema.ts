@@ -10,6 +10,14 @@ export const estadoUsuarioEnum = pgEnum('estado_usuario', [
 
 export type EstadoUsuario = (typeof estadoUsuarioEnum.enumValues)[number];
 
+export const estadoZonaEnum = pgEnum('estado_zona', [
+  'operativa',
+  'mantenimiento',
+  'inactiva',
+]);
+
+export type EstadoZona = (typeof estadoZonaEnum.enumValues)[number];
+
 export const usuarios = pgTable('usuarios', {
   id: uuid('id').primaryKey().default(sql`uuid_generate_v7()`),
   documento_identidad: varchar('documento_identidad', { length: 20 }).notNull(),
@@ -44,6 +52,17 @@ export const zonas_azules = pgTable('zonas_azules', {
   /** Contador viejo, SIN USO: los disponibles salen de `zonasConDisponibilidad`. Se borrará. */
   capacidad: integer('capacidad').notNull().default(0),
   capacidad_total: integer('capacidad_total').notNull().default(0),
+  estado: estadoZonaEnum('estado').notNull().default('operativa'),
+});
+
+/** Zonas que atiende cada controlador (muchos a muchos). */
+export const zonas_controladores = pgTable('zonas_controladores', {
+  id_zona: integer('id_zona').notNull().references(() => zonas_azules.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
+  id_controlador: uuid('id_controlador').notNull().references(() => controladores.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
+}, (table) => {
+  return [
+    primaryKey({ columns: [table.id_zona, table.id_controlador] }),
+  ];
 });
 
 export const horario_zona = pgTable('horario_zona', {
@@ -77,4 +96,5 @@ export const zonasConDisponibilidad = pgView('zonas_con_disponibilidad', {
   indicaciones: text('indicaciones'),
   capacidad_total: integer('capacidad_total').notNull(),
   capacidad: integer('capacidad').notNull(),
+  estado: estadoZonaEnum('estado').notNull(),
 }).existing();

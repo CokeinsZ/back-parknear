@@ -26,6 +26,12 @@ export const estadoReservaEnum = pgEnum('estado_reserva', [
   'completada',
 ]);
 
+export const estadoZonaEnum = pgEnum('estado_zona', [
+  'operativa',
+  'mantenimiento',
+  'inactiva',
+]);
+
 export const metodoPagoEnum = pgEnum('metodo_pago', ['efectivo', 'mercadopago']);
 export const estadoPagoEnum = pgEnum('estado_pago', [
   'pendiente',
@@ -86,6 +92,7 @@ export const zonasAzules = pgTable('zonas_azules', {
   indicaciones: text('indicaciones'),
   capacidad: integer('capacidad').notNull().default(0),
   capacidad_total: integer('capacidad_total').notNull().default(0),
+  estado: estadoZonaEnum('estado').notNull().default('operativa'),
 });
 
 export const reservas = pgTable('reservas', {

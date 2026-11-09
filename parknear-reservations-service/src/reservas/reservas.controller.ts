@@ -35,7 +35,8 @@ export class ReservasController {
   /**
    * POST /reservas { id_zona, id_vehiculo, horas } -> reserva `pendiente`.
    * El conductor sale del token; fecha_fin = ahora + horas y precio = 5000 + horas × 3500.
-   * 403 VEHICULO_AJENO | 409 VEHICULO_CON_RESERVA | 404 ZONA_NO_EXISTE | 409 ZONA_SIN_CUPO
+   * 403 VEHICULO_AJENO | 409 VEHICULO_CON_RESERVA | 404 ZONA_NO_EXISTE
+   * | 409 ZONA_NO_OPERATIVA | 409 ZONA_SIN_CUPO
    */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('CONDUCTOR')
@@ -49,12 +50,14 @@ export class ReservasController {
 
   /**
    * GET /reservas?q=texto&estado=pendiente&limit=20&offset=0 -> { items, total, limit, offset }
-   * Reservas de todas las zonas, cada una con su conductor, vehículo y zona.
+   * Cada reserva con su conductor, vehículo y zona. El admin ve todas las zonas; el
+   * encargado, solo las que tiene asignadas.
    */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('ADMIN', 'CONTROLADOR')
   @Get()
   async search(
+    @Request() req: { user: Solicitante },
     @Query('q') q?: string,
     @Query('estado') estado?: string,
     @Query('limit') limit?: string,
@@ -64,15 +67,19 @@ export class ReservasController {
       q,
       estado,
       leerPaginacion(limit, offset),
+      req.user,
     );
   }
 
-  /** GET /reservas/resumen -> { total, pendiente, activa, completada, cancelada }. Va antes de `:id`. */
+  /**
+   * GET /reservas/resumen -> { total, pendiente, activa, completada, cancelada }. Va antes de `:id`.
+   * Para el encargado, solo cuenta sus zonas asignadas.
+   */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('ADMIN', 'CONTROLADOR')
   @Get('resumen')
-  async resumen() {
-    return this.reservasService.resumen();
+  async resumen(@Request() req: { user: Solicitante }) {
+    return this.reservasService.resumen(req.user);
   }
 
   /** GET /reservas/:id -> una reserva | 404 RESERVA_NO_EXISTE | 403 RESERVA_AJENA (conductor) */
@@ -119,26 +126,36 @@ export class ReservasController {
     return this.reservasService.resumenDeConductor(id, req.user);
   }
 
-  /** GET /reservas/:id/completa -> { reserva, conductor, vehiculo, zona } (detalle del encargado). */
+  /**
+   * GET /reservas/:id/completa -> { reserva, conductor, vehiculo, zona } (detalle del encargado).
+   * 403 ZONA_NO_ASIGNADA si el encargado no tiene asignada la zona.
+   */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('ADMIN', 'CONTROLADOR')
   @Get(':id/completa')
-  async findCompleteById(@Param('id', ParseIntPipe) id: number) {
-    return this.reservasService.findCompleteById(id);
+  async findCompleteById(
+    @Param('id', ParseIntPipe) id: number,
+    @Request() req: { user: Solicitante },
+  ) {
+    return this.reservasService.findCompleteById(id, req.user);
   }
 
+  /** GET /reservas/zona/:idZona -> reservas de la zona. 403 ZONA_NO_ASIGNADA (encargado). */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('ADMIN', 'CONTROLADOR')
   @Get('zona/:idZona')
-  async findByZonaId(@Param('idZona', ParseIntPipe) idZona: number) {
-    return this.reservasService.findCompleteByZonaId(idZona);
+  async findByZonaId(
+    @Param('idZona', ParseIntPipe) idZona: number,
+    @Request() req: { user: Solicitante },
+  ) {
+    return this.reservasService.findCompleteByZonaId(idZona, req.user);
   }
 
   /**
    * PUT /reservas/:id/state { estado: 'activa' | 'cancelada' } -> reserva.
    * `activa` = aceptar una `pendiente`; `cancelada` = rechazar o cancelar una en curso
    * (sin llegada, el precio queda en el cargo de reserva). No toca fechas.
-   * 404 RESERVA_NO_EXISTE | 409 LLEGADA_VENCIDA | 409 TRANSICION_INVALIDA
+   * 404 RESERVA_NO_EXISTE | 403 ZONA_NO_ASIGNADA | 409 LLEGADA_VENCIDA | 409 TRANSICION_INVALIDA
    */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('ADMIN', 'CONTROLADOR')
@@ -146,15 +163,20 @@ export class ReservasController {
   async updateState(
     @Param('id', ParseIntPipe) id: number,
     @Body() updateReservaStateDto: UpdateReservaStateDto,
+    @Request() req: { user: Solicitante },
   ): Promise<ReservaRecord> {
-    return this.reservasService.updateState(id, updateReservaStateDto.estado);
+    return this.reservasService.updateState(
+      id,
+      updateReservaStateDto.estado,
+      req.user,
+    );
   }
 
   /**
    * POST /reservas/:id/llegada (sin cuerpo) -> reserva con `fecha_real_inicio` = ahora.
    * El encargado verificó la placa; la reserva sigue `activa` hasta `fecha_fin`.
-   * 404 RESERVA_NO_EXISTE | 409 RESERVA_NO_ACEPTADA | 409 LLEGADA_YA_CONFIRMADA
-   * | 409 LLEGADA_VENCIDA | 409 TRANSICION_INVALIDA
+   * 404 RESERVA_NO_EXISTE | 403 ZONA_NO_ASIGNADA | 409 RESERVA_NO_ACEPTADA
+   * | 409 LLEGADA_YA_CONFIRMADA | 409 LLEGADA_VENCIDA | 409 TRANSICION_INVALIDA
    */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('ADMIN', 'CONTROLADOR')
@@ -162,8 +184,9 @@ export class ReservasController {
   @HttpCode(HttpStatus.OK)
   async confirmarLlegada(
     @Param('id', ParseIntPipe) id: number,
+    @Request() req: { user: Solicitante },
   ): Promise<ReservaRecord> {
-    return this.reservasService.confirmarLlegada(id);
+    return this.reservasService.confirmarLlegada(id, req.user);
   }
 
   /**

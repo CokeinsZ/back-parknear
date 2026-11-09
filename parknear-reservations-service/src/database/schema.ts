@@ -6,6 +6,7 @@ import {
   pgEnum,
   pgTable,
   pgView,
+  primaryKey,
   serial,
   text,
   timestamp,
@@ -25,6 +26,12 @@ export const estadoReservaEnum = pgEnum('estado_reserva', [
   'pendiente',
   'cancelada',
   'completada',
+]);
+
+export const estadoZonaEnum = pgEnum('estado_zona', [
+  'operativa',
+  'mantenimiento',
+  'inactiva',
 ]);
 
 export const metodoPagoEnum = pgEnum('metodo_pago', ['efectivo', 'mercadopago']);
@@ -87,7 +94,22 @@ export const zonasAzules = pgTable('zonas_azules', {
   indicaciones: text('indicaciones'),
   capacidad: integer('capacidad').notNull().default(0),
   capacidad_total: integer('capacidad_total').notNull().default(0),
+  estado: estadoZonaEnum('estado').notNull().default('operativa'),
 });
+
+/** Zonas que atiende cada controlador: solo ve y gestiona las reservas de estas zonas. */
+export const zonasControladores = pgTable(
+  'zonas_controladores',
+  {
+    id_zona: integer('id_zona')
+      .notNull()
+      .references(() => zonasAzules.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
+    id_controlador: uuid('id_controlador')
+      .notNull()
+      .references(() => controladores.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
+  },
+  (table) => [primaryKey({ columns: [table.id_zona, table.id_controlador] })],
+);
 
 export const reservas = pgTable('reservas', {
   id: serial('id').primaryKey(),

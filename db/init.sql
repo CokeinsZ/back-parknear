@@ -35,6 +35,11 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
+DO $$ BEGIN
+  CREATE TYPE estado_zona AS ENUM ('operativa', 'mantenimiento', 'inactiva');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
 CREATE TABLE IF NOT EXISTS usuarios (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
   documento_identidad VARCHAR(20) NOT NULL,
@@ -102,8 +107,20 @@ CREATE TABLE IF NOT EXISTS zonas_azules (
   longitud DECIMAL(9, 6) NOT NULL,
   indicaciones TEXT,
   capacidad INTEGER NOT NULL DEFAULT 0,
-  capacidad_total INTEGER NOT NULL DEFAULT 0
+  capacidad_total INTEGER NOT NULL DEFAULT 0,
+  estado estado_zona NOT NULL DEFAULT 'operativa'
 );
+
+-- Zonas que atiende cada controlador: solo ve y gestiona las reservas de estas zonas.
+CREATE TABLE IF NOT EXISTS zonas_controladores (
+  id_zona INTEGER NOT NULL REFERENCES zonas_azules (id) ON DELETE CASCADE ON UPDATE CASCADE,
+  id_controlador UUID NOT NULL REFERENCES controladores (id) ON DELETE CASCADE ON UPDATE CASCADE,
+  PRIMARY KEY (id_zona, id_controlador)
+);
+
+-- La llave primaria empieza por id_zona; esto cubre la búsqueda por controlador.
+CREATE INDEX IF NOT EXISTS ix_zonas_controladores_controlador
+    ON zonas_controladores (id_controlador);
 
 CREATE TABLE IF NOT EXISTS horario_zona (
   id_zona INTEGER NOT NULL REFERENCES zonas_azules (id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -161,7 +178,8 @@ SELECT r.id, r.id_zona, r.id_vehiculo, r.id_conductor, r.estado,
 -- La columna zonas_azules.capacidad (el contador viejo) queda sin uso.
 CREATE OR REPLACE VIEW zonas_con_disponibilidad AS
 SELECT z.id, z.latitud, z.longitud, z.indicaciones, z.capacidad_total,
-       greatest(z.capacidad_total - coalesce(o.ocupados, 0), 0)::int AS capacidad
+       greatest(z.capacidad_total - coalesce(o.ocupados, 0), 0)::int AS capacidad,
+       z.estado
   FROM zonas_azules z
   LEFT JOIN (SELECT id_zona, count(*)::int AS ocupados FROM reservas_en_curso GROUP BY id_zona) o
          ON o.id_zona = z.id;

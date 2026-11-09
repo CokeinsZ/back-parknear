@@ -69,6 +69,13 @@ const reservaNoExiste = () =>
 
 const MS_PARA_LLEGAR = MINUTOS_PARA_LLEGAR * 60 * 1000;
 
+/** El controlador cuyas zonas limitan lo que ve el solicitante. `undefined`: ve todas (admin). */
+function controladorDe(solicitante: Solicitante): string | undefined {
+  return solicitante.tipo_usuario === 'controlador'
+    ? solicitante.sub
+    : undefined;
+}
+
 /**
  * La reserva se canceló porque el conductor no llegó a tiempo: sin llegada y cancelada
  * cuando ya habían pasado los 15 minutos (antes de eso, solo el encargado pudo cancelarla).
@@ -89,7 +96,7 @@ export class ReservasService {
 
   /**
    * Crea una reserva `pendiente` para el conductor del token. En una transacción revisa que
-   * el vehículo sea suyo, que no tenga otra reserva en curso y que la zona tenga cupo.
+   * el vehículo sea suyo, que no tenga otra reserva en curso y que la zona esté operativa y con cupo.
    */
   async create(
     dto: CreateReservaDto,
@@ -123,6 +130,8 @@ export class ReservasService {
         );
       case 'ZONA_NO_EXISTE':
         return noEncontrado(error, 'La zona no existe.');
+      case 'ZONA_NO_OPERATIVA':
+        return conflicto(error, 'La zona no está recibiendo reservas.');
       case 'ZONA_SIN_CUPO':
         return conflicto(error, 'La zona ya no tiene cupos disponibles.');
     }
@@ -161,18 +170,21 @@ export class ReservasService {
 
   async resumenDeConductor(userId: string, solicitante: Solicitante) {
     this.validarDueno(userId, solicitante);
-    return this.reservasRepository.resumen(userId);
+    return this.reservasRepository.resumen({ idConductor: userId });
   }
 
-  async resumen() {
-    return this.reservasRepository.resumen();
+  async resumen(solicitante: Solicitante) {
+    return this.reservasRepository.resumen({
+      idControlador: controladorDe(solicitante),
+    });
   }
 
-  /** Búsqueda paginada sobre las reservas de todas las zonas (para el encargado). */
+  /** Búsqueda paginada: el admin ve todas las zonas y el encargado, solo las suyas. */
   async search(
     q: string | undefined,
     estado: string | undefined,
     paginacion: Paginacion,
+    solicitante: Solicitante,
   ) {
     if (
       estado &&
@@ -188,22 +200,53 @@ export class ReservasService {
       normalizarBusqueda(q),
       (estado as EstadoReserva | undefined) ?? null,
       paginacion,
+      controladorDe(solicitante),
     );
     return { items, total, ...paginacion };
   }
 
-  async findCompleteByZonaId(zonaId: number) {
+  async findCompleteByZonaId(zonaId: number, solicitante: Solicitante) {
+    await this.validarZonaAsignada(zonaId, solicitante);
     return this.reservasRepository.findCompleteByZonaId(zonaId);
   }
 
-  async findCompleteById(id: number) {
+  async findCompleteById(id: number, solicitante: Solicitante) {
     const fila = await this.reservasRepository.findCompleteById(id);
 
     if (!fila) {
       throw reservaNoExiste();
     }
 
+    await this.validarZonaAsignada(fila.reserva.id_zona, solicitante);
     return fila;
+  }
+
+  /** Un encargado solo gestiona las zonas que tiene asignadas. El admin, todas. */
+  private async validarZonaAsignada(
+    idZona: number | null,
+    solicitante: Solicitante,
+  ) {
+    const idControlador = controladorDe(solicitante);
+    if (idControlador === undefined) return;
+
+    if (
+      idZona === null ||
+      !(await this.reservasRepository.tieneZonaAsignada(idControlador, idZona))
+    ) {
+      throw prohibido(
+        'ZONA_NO_ASIGNADA',
+        'Esta zona azul no está asignada a tu cuenta.',
+      );
+    }
+  }
+
+  /** `validarZonaAsignada` para la zona de una reserva. */
+  private async validarReservaAsignada(id: number, solicitante: Solicitante) {
+    if (controladorDe(solicitante) === undefined) return;
+
+    const reserva = await this.reservasRepository.findById(id);
+    if (!reserva) throw reservaNoExiste();
+    await this.validarZonaAsignada(reserva.id_zona, solicitante);
   }
 
   private validarDueno(idConductor: string | null, solicitante: Solicitante) {
@@ -222,7 +265,10 @@ export class ReservasService {
   async updateState(
     id: number,
     estado: EstadoDelEncargado,
+    solicitante: Solicitante,
   ): Promise<ReservaRecord> {
+    await this.validarReservaAsignada(id, solicitante);
+
     const { reserva, actual } = await this.reservasRepository.cambiarEstado(
       id,
       estado,
@@ -233,7 +279,12 @@ export class ReservasService {
   }
 
   /** El encargado verificó la placa: registra la llegada. La reserva sigue `activa`. */
-  async confirmarLlegada(id: number): Promise<ReservaRecord> {
+  async confirmarLlegada(
+    id: number,
+    solicitante: Solicitante,
+  ): Promise<ReservaRecord> {
+    await this.validarReservaAsignada(id, solicitante);
+
     const { reserva, actual } =
       await this.reservasRepository.confirmarLlegada(id);
     if (reserva) return reserva;

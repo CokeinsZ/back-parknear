@@ -75,6 +75,7 @@ export type ErrorAlCrear =
   | 'VEHICULO_AJENO'
   | 'VEHICULO_CON_RESERVA'
   | 'ZONA_NO_EXISTE'
+  | 'ZONA_NO_OPERATIVA'
   | 'ZONA_SIN_CUPO';
 
 /**
@@ -158,7 +159,7 @@ export class ReservasRepository {
 
   /**
    * Crea la reserva solo si el vehículo es del conductor, no tiene otra en curso y la
-   * zona tiene cupo, todo en una transacción. Orden de bloqueo fijo: vehículo y luego
+   * zona está operativa y con cupo, todo en una transacción. Orden de bloqueo fijo: vehículo y luego
    * zona (nadie bloquea en orden inverso, así que no hay deadlocks).
    */
   async crearConCupo(input: {
@@ -202,11 +203,17 @@ export class ReservasRepository {
 
       // 4. Bloquea la zona: quien llegue después espera aquí, y su conteo ya incluye esta reserva.
       const [zona] = await tx
-        .select({ total: schema.zonasAzules.capacidad_total })
+        .select({
+          total: schema.zonasAzules.capacidad_total,
+          estado: schema.zonasAzules.estado,
+        })
         .from(schema.zonasAzules)
         .where(eq(schema.zonasAzules.id, input.idZona))
         .for('update');
       if (!zona) return { error: 'ZONA_NO_EXISTE' as const };
+      if (zona.estado !== 'operativa') {
+        return { error: 'ZONA_NO_OPERATIVA' as const };
+      }
 
       const [{ ocupados }] = await tx
         .select({ ocupados: count() })
@@ -381,8 +388,44 @@ export class ReservasRepository {
     return { items, total: conteo?.total ?? 0 };
   }
 
-  /** Cuántas reservas hay en cada estado: todas, o solo las de un conductor. */
-  async resumen(idConductor?: string): Promise<ResumenReservas> {
+  /** Filtro: las reservas de las zonas asignadas a un controlador. */
+  private deZonasAsignadas(idControlador: string): SQL {
+    return inArray(
+      schema.reservas.id_zona,
+      this.db
+        .select({ id: schema.zonasControladores.id_zona })
+        .from(schema.zonasControladores)
+        .where(eq(schema.zonasControladores.id_controlador, idControlador)),
+    );
+  }
+
+  /** Si la zona está asignada al controlador. */
+  async tieneZonaAsignada(
+    idControlador: string,
+    idZona: number,
+  ): Promise<boolean> {
+    const [asignacion] = await this.db
+      .select({ id: schema.zonasControladores.id_zona })
+      .from(schema.zonasControladores)
+      .where(
+        and(
+          eq(schema.zonasControladores.id_controlador, idControlador),
+          eq(schema.zonasControladores.id_zona, idZona),
+        ),
+      )
+      .limit(1);
+
+    return asignacion !== undefined;
+  }
+
+  /** Cuántas reservas hay en cada estado: todas, las de un conductor o las de las zonas de un controlador. */
+  async resumen({
+    idConductor,
+    idControlador,
+  }: {
+    idConductor?: string;
+    idControlador?: string;
+  } = {}): Promise<ResumenReservas> {
     const [fila] = await this.db
       .select({
         total: count(),
@@ -393,7 +436,12 @@ export class ReservasRepository {
       })
       .from(schema.reservas)
       .where(
-        idConductor ? eq(schema.reservas.id_conductor, idConductor) : undefined,
+        and(
+          idConductor
+            ? eq(schema.reservas.id_conductor, idConductor)
+            : undefined,
+          idControlador ? this.deZonasAsignadas(idControlador) : undefined,
+        ),
       );
 
     return (
@@ -440,19 +488,21 @@ export class ReservasRepository {
   }
 
   /**
-   * Una página de reservas de todas las zonas, primero las que necesitan
-   * atención. `busqueda` (ya normalizada) se compara con la placa, el nombre y
-   * documento del conductor, las indicaciones de la zona, "#12" (número de
-   * reserva) y "zona 3".
+   * Una página de reservas, primero las que necesitan atención. Con
+   * `idControlador`, solo las de sus zonas asignadas. `busqueda` (ya normalizada)
+   * se compara con la placa, el nombre y documento del conductor, las
+   * indicaciones de la zona, "#12" (número de reserva) y "zona 3".
    */
   async search(
     busqueda: string | null,
     estado: EstadoReserva | null,
     { limit, offset }: Paginacion,
+    idControlador?: string,
   ) {
     const filtro = and(
       estado ? eq(schema.reservas.estado, estado) : undefined,
       busqueda ? this.filtroBusqueda(busqueda) : undefined,
+      idControlador ? this.deZonasAsignadas(idControlador) : undefined,
     );
 
     const [items, [conteo]] = await Promise.all([

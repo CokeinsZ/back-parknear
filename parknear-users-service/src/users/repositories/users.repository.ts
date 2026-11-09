@@ -23,6 +23,7 @@ import {
   controladores,
   usuarios,
   vehiculos,
+  zonasControladores,
 } from 'src/database/schema';
 
 export type TipoUsuario = 'conductor' | 'controlador' | 'admin' | null;
@@ -472,6 +473,11 @@ export class UsersRepository {
         .update(controladores)
         .set({ estado: 'eliminado' })
         .where(and(eq(controladores.id, id), tipoVigente(controladores.estado)));
+      // Sus zonas no son historial: quien deja de ser controlador deja de atenderlas ya,
+      // aunque su token siga vigente, y no las recupera si vuelve a serlo.
+      await tx
+        .delete(zonasControladores)
+        .where(eq(zonasControladores.id_controlador, id));
     }
     if (tipo !== 'admin') {
       await tx

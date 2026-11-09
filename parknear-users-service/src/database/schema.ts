@@ -60,3 +60,9 @@ export const admin = pgTable('admin', {
     .references(() => usuarios.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
   estado: estadoUsuarioEnum('estado').notNull().default('activo'),
 });
+
+/** Zonas de cada controlador. Aquí solo se usa para quitárselas cuando deja de serlo. */
+export const zonasControladores = pgTable('zonas_controladores', {
+  id_zona: integer('id_zona').notNull(),
+  id_controlador: uuid('id_controlador').notNull(),
+});
