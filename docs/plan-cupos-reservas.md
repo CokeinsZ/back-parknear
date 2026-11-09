@@ -120,11 +120,13 @@ Consecuencias:
 | No llegó → `cancelada` | Job | `estado IN ('pendiente','activa')`, `fecha_real_inicio IS NULL`, `fecha_creacion <= ahora − 15 min` | `precio` = 5000 |
 | Terminó → `completada` | Job | `estado='activa'`, `fecha_real_inicio IS NOT NULL`, `fecha_fin <= ahora` | Solo `estado` |
 | **Extender** | Conductor dueño, `PATCH /reservas/:id/extend {horas}` | En curso, y `fecha_fin + horas <= fecha_creacion + 24 h` | `fecha_fin` += horas, `precio` += horas × 3500 |
+| **Cancelar** (conductor) | Conductor dueño, `POST /reservas/:id/cancelar` | `estado IN ('pendiente','activa')` y `fecha_real_inicio IS NULL` | `estado` = `cancelada`, `precio` = 5000. Las fechas no se tocan. |
+| **Terminar** (conductor) | Conductor dueño, `POST /reservas/:id/terminar` | `estado='activa'` y `fecha_real_inicio IS NOT NULL` | `estado` = `completada`. Precio completo. `fecha_fin` no cambia; el fin real queda en `fecha_actualizacion`. |
 
 Reglas:
 - Cualquier otra combinación devuelve **409**.
 - Confirmar la llegada de una `pendiente` devuelve 409 "Primero acepta la reserva". Es el flujo del usuario: primero aceptar, luego confirmar.
-- Nadie pasa una reserva a `completada` a mano: solo el job.
+- Una reserva pasa a `completada` por el job o porque el conductor la termina. El encargado nunca la completa a mano.
 - "Vencer primero" significa que cada acción, dentro de su transacción, aplica antes el vencimiento a esa reserva. Así una llegada o una aceptación tardía (15 minutos o más) no revive una reserva vencida: la reserva queda `cancelada` y la respuesta es 409 `LLEGADA_VENCIDA`.
 
 ## 4. La regla única de qué ocupa un cupo
@@ -873,6 +875,4 @@ Después, también: `npm run build` y `npm run lint` en reservations, zones y pa
 - Borrar un vehículo con una reserva en curso: la FK `ON DELETE SET NULL` deja la reserva sin vehículo, y sigue ocupando el cupo. Conviene responder 409 en ese caso.
 - Borrar una zona con reservas: la FK `RESTRICT` da 23503 y hoy responde 500.
 - Pagos: no hay reembolsos. Si algún día se paga por adelantado, la regla "cancelada sin llegada = 5000" implica devolver la diferencia.
-- `horario_zona` no tiene endpoints, así que los encargados no están limitados a sus zonas.
-- El conductor no puede cancelar su propia reserva (no hay endpoint). Si se quiere: `POST /reservas/:id/cancelar`, solo para el dueño, solo sin llegada y con precio 5000.
-- Si un carro se va antes de `fecha_fin`, el encargado solo puede cancelar. Un "finalizar antes" (activa → completada, liberando el cupo) sería un endpoint aparte.
+- `horario_zona` no tiene endpoints. Los encargados se limitan a sus zonas con `zonas_controladores`.

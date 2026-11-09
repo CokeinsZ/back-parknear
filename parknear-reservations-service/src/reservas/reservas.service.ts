@@ -319,6 +319,63 @@ export class ReservasService {
     );
   }
 
+  /** El conductor dueño cancela su reserva mientras no le hayan verificado la placa. Solo se cobra el cargo de reserva. */
+  async cancelarPorConductor(
+    id: number,
+    userId: string,
+  ): Promise<ReservaRecord> {
+    const { reserva, actual } =
+      await this.reservasRepository.cancelarPorConductor(id, userId);
+    if (reserva) return reserva;
+
+    if (
+      actual?.id_conductor === userId &&
+      actual.estado === 'activa' &&
+      actual.fecha_real_inicio !== null
+    ) {
+      throw conflicto(
+        'LLEGADA_YA_CONFIRMADA',
+        'Tu llegada ya se confirmó: ahora puedes terminar la reserva.',
+      );
+    }
+    throw this.rechazoAlConductor(actual, userId);
+  }
+
+  /** El conductor dueño termina su reserva con la placa ya verificada. Se cobra completa. */
+  async terminarPorConductor(
+    id: number,
+    userId: string,
+  ): Promise<ReservaRecord> {
+    const { reserva, actual } =
+      await this.reservasRepository.terminarPorConductor(id, userId);
+    if (reserva) return reserva;
+
+    if (
+      actual?.id_conductor === userId &&
+      actual.fecha_real_inicio === null &&
+      (actual.estado === 'pendiente' || actual.estado === 'activa')
+    ) {
+      throw conflicto(
+        'LLEGADA_SIN_CONFIRMAR',
+        'El encargado aún no ha confirmado tu llegada.',
+      );
+    }
+    throw this.rechazoAlConductor(actual, userId);
+  }
+
+  private rechazoAlConductor(
+    actual: ResultadoTransicion['actual'],
+    userId: string,
+  ) {
+    if (actual && actual.id_conductor !== userId) {
+      return prohibido(
+        'RESERVA_AJENA',
+        'Solo puedes gestionar tus propias reservas',
+      );
+    }
+    return this.transicionRechazada(actual);
+  }
+
   /** El conductor dueño suma horas a su reserva en curso, sin pasar de HORAS_MAX desde la creación. */
   async extendReserva(
     id: number,

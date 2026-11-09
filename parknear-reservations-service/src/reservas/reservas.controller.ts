@@ -190,6 +190,39 @@ export class ReservasController {
   }
 
   /**
+   * POST /reservas/:id/cancelar (sin cuerpo) -> la reserva `cancelada`, con precio = cargo de reserva.
+   * Solo el conductor dueño y solo si la placa aún no se ha verificado (`pendiente` o `activa` sin llegada).
+   * 404 RESERVA_NO_EXISTE | 403 RESERVA_AJENA | 409 LLEGADA_YA_CONFIRMADA | 409 LLEGADA_VENCIDA
+   * | 409 TRANSICION_INVALIDA
+   */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('CONDUCTOR')
+  @Post(':id/cancelar')
+  @HttpCode(HttpStatus.OK)
+  async cancelarPorConductor(
+    @Param('id', ParseIntPipe) id: number,
+    @Request() req: { user: Solicitante },
+  ): Promise<ReservaRecord> {
+    return this.reservasService.cancelarPorConductor(id, req.user.sub);
+  }
+
+  /**
+   * POST /reservas/:id/terminar (sin cuerpo) -> la reserva `completada`, con el precio completo.
+   * Solo el conductor dueño y solo con la placa verificada (`fecha_real_inicio`). Libera el cupo.
+   * 404 RESERVA_NO_EXISTE | 403 RESERVA_AJENA | 409 LLEGADA_SIN_CONFIRMAR | 409 TRANSICION_INVALIDA
+   */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('CONDUCTOR')
+  @Post(':id/terminar')
+  @HttpCode(HttpStatus.OK)
+  async terminarPorConductor(
+    @Param('id', ParseIntPipe) id: number,
+    @Request() req: { user: Solicitante },
+  ): Promise<ReservaRecord> {
+    return this.reservasService.terminarPorConductor(id, req.user.sub);
+  }
+
+  /**
    * PATCH /reservas/:id/extend { horas } -> reserva con `fecha_fin` + horas y precio + horas × 3500.
    * 404 RESERVA_NO_EXISTE | 403 RESERVA_AJENA | 409 RESERVA_TERMINADA | 400 DURACION_MAXIMA
    */

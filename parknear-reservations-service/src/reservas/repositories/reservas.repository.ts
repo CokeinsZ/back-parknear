@@ -305,6 +305,68 @@ export class ReservasRepository {
     });
   }
 
+  /** Cambio que pide el conductor dueño, con guarda. Primero vence lo vencido. No toca las fechas de la reserva. */
+  private transicionDelConductor(
+    id: number,
+    idConductor: string,
+    cambios: Partial<typeof schema.reservas.$inferInsert>,
+    guarda: SQL | undefined,
+  ): Promise<ResultadoTransicion> {
+    return this.transaccion(async (tx) => {
+      const deEsta = eq(schema.reservas.id, id);
+      await this.vencer(tx, deEsta);
+
+      const [reserva] = await tx
+        .update(schema.reservas)
+        .set({ ...cambios, fecha_actualizacion: ahoraUtc })
+        .where(
+          and(deEsta, eq(schema.reservas.id_conductor, idConductor), guarda),
+        )
+        .returning();
+
+      if (reserva) return { reserva };
+      return {
+        actual: (await tx.query.reservas.findFirst({ where: deEsta })) ?? null,
+      };
+    });
+  }
+
+  /** El conductor cancela su reserva mientras no le hayan verificado la placa: solo se cobra el cargo de reserva. */
+  cancelarPorConductor(
+    id: number,
+    idConductor: string,
+  ): Promise<ResultadoTransicion> {
+    return this.transicionDelConductor(
+      id,
+      idConductor,
+      { estado: 'cancelada', precio: CARGO_RESERVA.toFixed(2) },
+      and(
+        inArray(schema.reservas.estado, ['pendiente', 'activa']),
+        isNull(schema.reservas.fecha_real_inicio),
+      ),
+    );
+  }
+
+  /**
+   * El conductor termina su reserva con la placa ya verificada (`fecha_real_inicio`):
+   * libera el cupo y conserva el precio completo. `fecha_fin` sigue siendo el fin reservado;
+   * cuándo terminó de verdad queda en `fecha_actualizacion`.
+   */
+  terminarPorConductor(
+    id: number,
+    idConductor: string,
+  ): Promise<ResultadoTransicion> {
+    return this.transicionDelConductor(
+      id,
+      idConductor,
+      { estado: 'completada' },
+      and(
+        eq(schema.reservas.estado, 'activa'),
+        isNotNull(schema.reservas.fecha_real_inicio),
+      ),
+    );
+  }
+
   /** Suma horas a una reserva en curso del conductor, sin pasar de HORAS_MAX desde la creación. */
   async extender(
     id: number,
