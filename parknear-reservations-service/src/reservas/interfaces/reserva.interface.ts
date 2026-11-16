@@ -34,7 +34,9 @@ export interface ReservaRecord {
   id_conductor: string | null;
   id_zona: number | null;
   id_vehiculo: string | null;
-  fecha_real_inicio: Date;
+  /** Llegada confirmada; null = no ha llegado. */
+  fecha_real_inicio: Date | null;
+  /** Fin de la reserva: creación + horas reservadas (más las extensiones). */
   fecha_fin: Date | null;
   precio: string;
   estado: EstadoReserva;

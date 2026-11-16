@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
+import { ScheduleModule } from '@nestjs/schedule';
 import { DatabaseModule } from './database/database.module';
 import { ReservasModule } from './reservas/reservas.module';
 import { JwtStrategy } from './auth/strategies/jwt.strategy';
@@ -10,6 +11,7 @@ import { RolesGuard } from './auth/guards/roles.guard';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    ScheduleModule.forRoot(),
     DatabaseModule,
     ReservasModule,
     JwtModule.register({

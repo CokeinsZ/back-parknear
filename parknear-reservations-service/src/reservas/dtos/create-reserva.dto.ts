@@ -1,26 +1,34 @@
 import { Type } from 'class-transformer';
 import {
-  IsDateString,
   IsInt,
+  IsNotEmpty,
   IsString,
-  IsUUID,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import { HORAS_MAX, HORAS_MIN } from '../reglas';
 
+/**
+ * El conductor sale del token y el fin lo calcula el servidor (creación + horas)
+ * con el reloj de la base de datos: no se aceptan `id_conductor` ni `fecha_fin`.
+ */
 export class CreateReservaDto {
-  @IsUUID()
-  id_conductor!: string;
-
   @Type(() => Number)
   @IsInt()
   @Min(1)
   id_zona!: number;
 
+  /** Placa del vehículo; debe ser del conductor que reserva. */
   @IsString()
+  @IsNotEmpty()
   @MaxLength(10)
   id_vehiculo!: string;
 
-  @IsDateString()
-  fecha_fin!: string;
+  /** Horas enteras reservadas. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(HORAS_MIN)
+  @Max(HORAS_MAX)
+  horas!: number;
 }

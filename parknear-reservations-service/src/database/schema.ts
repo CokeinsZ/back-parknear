@@ -5,6 +5,8 @@ import {
   jsonb,
   pgEnum,
   pgTable,
+  pgView,
+  primaryKey,
   serial,
   text,
   timestamp,
@@ -24,6 +26,12 @@ export const estadoReservaEnum = pgEnum('estado_reserva', [
   'pendiente',
   'cancelada',
   'completada',
+]);
+
+export const estadoZonaEnum = pgEnum('estado_zona', [
+  'operativa',
+  'mantenimiento',
+  'inactiva',
 ]);
 
 export const metodoPagoEnum = pgEnum('metodo_pago', ['efectivo', 'mercadopago']);
@@ -86,7 +94,22 @@ export const zonasAzules = pgTable('zonas_azules', {
   indicaciones: text('indicaciones'),
   capacidad: integer('capacidad').notNull().default(0),
   capacidad_total: integer('capacidad_total').notNull().default(0),
+  estado: estadoZonaEnum('estado').notNull().default('operativa'),
 });
+
+/** Zonas que atiende cada controlador: solo ve y gestiona las reservas de estas zonas. */
+export const zonasControladores = pgTable(
+  'zonas_controladores',
+  {
+    id_zona: integer('id_zona')
+      .notNull()
+      .references(() => zonasAzules.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
+    id_controlador: uuid('id_controlador')
+      .notNull()
+      .references(() => controladores.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
+  },
+  (table) => [primaryKey({ columns: [table.id_zona, table.id_controlador] })],
+);
 
 export const reservas = pgTable('reservas', {
   id: serial('id').primaryKey(),
@@ -102,10 +125,24 @@ export const reservas = pgTable('reservas', {
     onDelete: 'set null',
     onUpdate: 'cascade',
   }),
-  fecha_real_inicio: timestamp('fecha_real_inicio', { mode: 'date' }).notNull(),
+  /** Llegada confirmada por el encargado. null = no ha llegado. */
+  fecha_real_inicio: timestamp('fecha_real_inicio', { mode: 'date' }),
   fecha_fin: timestamp('fecha_fin', { mode: 'date' }),
   precio: decimal('precio', { precision: 7, scale: 2 }).notNull().default('0'),
   estado: estadoReservaEnum('estado').notNull().default('pendiente'),
   fecha_creacion: timestamp('fecha_creacion', { mode: 'date' }).notNull().defaultNow(),
   fecha_actualizacion: timestamp('fecha_actualizacion', { mode: 'date' }).notNull().defaultNow(),
 });
+
+/**
+ * Reservas que ocupan un cupo ahora mismo (vista de db/migrations/001_cupos_calculados.sql).
+ * Es la única definición de "en curso": en camino (sin llegada, dentro de los 15 minutos) o
+ * parqueada (con llegada, antes de `fecha_fin`). Solo lectura.
+ */
+export const reservasEnCurso = pgView('reservas_en_curso', {
+  id: integer('id').notNull(),
+  id_zona: integer('id_zona'),
+  id_vehiculo: varchar('id_vehiculo', { length: 10 }),
+  id_conductor: uuid('id_conductor'),
+  estado: estadoReservaEnum('estado').notNull(),
+}).existing(); // existing(): drizzle-kit no intenta crearla

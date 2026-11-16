@@ -35,6 +35,11 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
+DO $$ BEGIN
+  CREATE TYPE estado_zona AS ENUM ('operativa', 'mantenimiento', 'inactiva');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
 CREATE TABLE IF NOT EXISTS usuarios (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
   documento_identidad VARCHAR(20) NOT NULL,
@@ -102,8 +107,20 @@ CREATE TABLE IF NOT EXISTS zonas_azules (
   longitud DECIMAL(9, 6) NOT NULL,
   indicaciones TEXT,
   capacidad INTEGER NOT NULL DEFAULT 0,
-  capacidad_total INTEGER NOT NULL DEFAULT 0
+  capacidad_total INTEGER NOT NULL DEFAULT 0,
+  estado estado_zona NOT NULL DEFAULT 'operativa'
 );
+
+-- Zonas que atiende cada controlador: solo ve y gestiona las reservas de estas zonas.
+CREATE TABLE IF NOT EXISTS zonas_controladores (
+  id_zona INTEGER NOT NULL REFERENCES zonas_azules (id) ON DELETE CASCADE ON UPDATE CASCADE,
+  id_controlador UUID NOT NULL REFERENCES controladores (id) ON DELETE CASCADE ON UPDATE CASCADE,
+  PRIMARY KEY (id_zona, id_controlador)
+);
+
+-- La llave primaria empieza por id_zona; esto cubre la búsqueda por controlador.
+CREATE INDEX IF NOT EXISTS ix_zonas_controladores_controlador
+    ON zonas_controladores (id_controlador);
 
 CREATE TABLE IF NOT EXISTS horario_zona (
   id_zona INTEGER NOT NULL REFERENCES zonas_azules (id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -119,12 +136,15 @@ CREATE TABLE IF NOT EXISTS reservas (
   id_conductor UUID REFERENCES conductores (id) ON DELETE RESTRICT ON UPDATE CASCADE,
   id_zona INTEGER REFERENCES zonas_azules (id) ON DELETE RESTRICT ON UPDATE CASCADE,
   id_vehiculo VARCHAR(10) REFERENCES vehiculos (placa) ON DELETE SET NULL ON UPDATE CASCADE,
-  fecha_real_inicio TIMESTAMP NOT NULL,
+  -- Llegada confirmada por el encargado (placa verificada). NULL = no ha llegado.
+  fecha_real_inicio TIMESTAMP,
+  -- Fin de la reserva: fecha_creacion + horas reservadas (más las extensiones).
   fecha_fin TIMESTAMP,
   precio DECIMAL(7, 2) NOT NULL DEFAULT '0',
   estado estado_reserva NOT NULL DEFAULT 'pendiente',
-  fecha_creacion TIMESTAMP NOT NULL DEFAULT NOW(),
-  fecha_actualizacion TIMESTAMP NOT NULL DEFAULT NOW(),
+  -- Las fechas de reservas guardan la hora UTC (timestamp sin zona), como las escribe el backend.
+  fecha_creacion TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc'),
+  fecha_actualizacion TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc'),
   CONSTRAINT ck_reservas_precio_no_negativo CHECK (precio >= 0)
 );
 
@@ -141,3 +161,34 @@ CREATE TABLE IF NOT EXISTS pagos (
   fecha_actualizacion TIMESTAMP DEFAULT NOW(),
   CONSTRAINT ck_pagos_monto_no_negativo CHECK (monto >= 0)
 );
+
+-- Cupos calculados y una reserva en curso por vehículo (igual que db/migrations/001_cupos_calculados.sql).
+
+-- Qué ocupa un cupo. ÚNICA definición. Los 15 minutos también están en reglas.ts (MINUTOS_PARA_LLEGAR).
+CREATE OR REPLACE VIEW reservas_en_curso AS
+SELECT r.id, r.id_zona, r.id_vehiculo, r.id_conductor, r.estado,
+       r.fecha_creacion, r.fecha_real_inicio, r.fecha_fin
+  FROM reservas r
+ WHERE (r.estado IN ('pendiente','activa') AND r.fecha_real_inicio IS NULL          -- en camino
+        AND r.fecha_creacion > (now() at time zone 'utc') - interval '15 minutes')
+    OR (r.estado = 'activa' AND r.fecha_real_inicio IS NOT NULL                     -- parqueada
+        AND r.fecha_fin > (now() at time zone 'utc'));
+
+-- Zonas con los cupos disponibles calculados. `capacidad` conserva el nombre que ya usa la app.
+-- La columna zonas_azules.capacidad (el contador viejo) queda sin uso.
+CREATE OR REPLACE VIEW zonas_con_disponibilidad AS
+SELECT z.id, z.latitud, z.longitud, z.indicaciones, z.capacidad_total,
+       greatest(z.capacidad_total - coalesce(o.ocupados, 0), 0)::int AS capacidad,
+       z.estado
+  FROM zonas_azules z
+  LEFT JOIN (SELECT id_zona, count(*)::int AS ocupados FROM reservas_en_curso GROUP BY id_zona) o
+         ON o.id_zona = z.id;
+
+CREATE INDEX IF NOT EXISTS ix_reservas_en_curso_zona
+    ON reservas (id_zona) WHERE estado IN ('pendiente','activa');
+-- Garantía final de "una reserva en curso por vehículo" (los NULL no chocan).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_reservas_vehiculo_en_curso
+    ON reservas (id_vehiculo) WHERE estado IN ('pendiente','activa');
+
+ALTER TABLE zonas_azules DROP CONSTRAINT IF EXISTS ck_zonas_capacidad_total;
+ALTER TABLE zonas_azules ADD CONSTRAINT ck_zonas_capacidad_total CHECK (capacidad_total >= 0);
