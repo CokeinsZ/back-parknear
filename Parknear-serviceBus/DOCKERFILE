@@ -1,5 +1,5 @@
 # ── Etapa 1: build ──────────────────────────────────────────────────────────
-FROM rust AS builder
+FROM rust:1.97-bookworm AS builder
 
 # Dependencias del sistema necesarias para sqlx (OpenSSL y libpq)
 RUN apt-get update && apt-get install -y \
