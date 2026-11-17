@@ -43,3 +43,10 @@ export interface ReservaRecord {
   fecha_creacion: Date;
   fecha_actualizacion: Date;
 }
+
+/** Una reserva con su zona: lo que necesitan los textos de los avisos. */
+export interface ReservaConZona {
+  reserva: ReservaRecord;
+  /** null si la zona se borró. */
+  zona: ZonaDeReserva | null;
+}

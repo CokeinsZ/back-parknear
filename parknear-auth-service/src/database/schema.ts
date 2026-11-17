@@ -60,3 +60,17 @@ export const admin = pgTable('admin', {
     .references(() => usuarios.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
   estado: estadoUsuarioEnum('estado').notNull().default('activo'),
 });
+
+/**
+ * Teléfonos donde cada usuario recibe avisos push (db/migrations/003_notificaciones_push.sql).
+ * El token de Expo es la llave: un teléfono es de UNA persona, y una persona puede tener varios.
+ */
+export const dispositivosPush = pgTable('dispositivos_push', {
+  token: varchar('token', { length: 255 }).primaryKey(),
+  id_usuario: uuid('id_usuario')
+    .notNull()
+    .references(() => usuarios.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
+  fecha_actualizacion: timestamp('fecha_actualizacion', { mode: 'date' })
+    .notNull()
+    .default(sql`(now() at time zone 'utc')`),
+});

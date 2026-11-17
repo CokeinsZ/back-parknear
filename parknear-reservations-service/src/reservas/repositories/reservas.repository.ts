@@ -10,6 +10,7 @@ import {
   or,
   sql,
   type SQL,
+  type SQLWrapper,
 } from 'drizzle-orm';
 import {
   patronContiene,
@@ -22,13 +23,16 @@ import * as schema from 'src/database/schema';
 import {
   CARGO_RESERVA,
   HORAS_MAX,
+  MINUTOS_DE_AVISO,
   MINUTOS_PARA_LLEGAR,
   TARIFA_HORA,
   ahoraUtc,
   precioPorHoras,
 } from '../reglas';
+import type { TipoAviso } from '../avisos';
 import {
   EstadoReserva,
+  ReservaConZona,
   ReservaRecord,
   ResumenReservas,
 } from '../interfaces/reserva.interface';
@@ -65,6 +69,11 @@ type Transaccion = Parameters<Parameters<Db['transaction']>[0]>[0];
 type Ejecutor = Db | Transaccion;
 
 const minutosParaLlegar = sql`make_interval(mins => ${MINUTOS_PARA_LLEGAR}::int)`;
+const minutosDeAviso = sql`make_interval(mins => ${MINUTOS_DE_AVISO}::int)`;
+/** Hasta cuándo tiene el conductor para que le verifiquen la placa. */
+const limiteDeLlegada = sql`${schema.reservas.fecha_creacion} + ${minutosParaLlegar}`;
+/** "No llegaste" solo se avisa de cancelaciones recientes: al desplegar no salen avisos de las viejas. */
+const ventanaAvisoNoLlego = sql`make_interval(mins => 30)`;
 /** Número fijo del candado del job (pg_try_advisory_xact_lock). */
 const CANDADO_VENCIMIENTO = 72_100_415;
 /** Reintentos de una transacción que falló por deadlock o serialización. */
@@ -85,6 +94,19 @@ export type ErrorAlCrear =
 export type ResultadoTransicion =
   | { reserva: ReservaRecord; actual?: undefined }
   | { reserva?: undefined; actual: ReservaRecord | null };
+
+/** Los avisos que programa el job (los demás salen en el momento del cambio). */
+type TipoAvisoProgramado = Extract<
+  TipoAviso,
+  'recordatorio_llegada' | 'recordatorio_fin' | 'no_llego'
+>;
+
+/** Ids de las reservas cuyos avisos programados ya tocan: el job los reclamó y hay que enviarlos. */
+export interface AvisosReclamados {
+  recordatorioLlegada: number[];
+  recordatorioFin: number[];
+  noLlego: number[];
+}
 
 @Injectable()
 export class ReservasRepository {
@@ -147,14 +169,105 @@ export class ReservasRepository {
     return { canceladas: canceladas.length, completadas: completadas.length };
   }
 
-  /** Lo que corre el job. Si otra réplica ya está venciendo, no hace nada y devuelve null. */
+  /**
+   * Lo que corre el job: vence lo vencido y reclama los avisos programados que ya tocan, en
+   * la misma transacción. Si otra réplica ya está en eso, no hace nada y devuelve null.
+   */
   async vencerConCandado() {
     return this.db.transaction(async (tx) => {
       const [fila] = await tx.execute<{ libre: boolean }>(
         sql`select pg_try_advisory_xact_lock(${CANDADO_VENCIMIENTO}::bigint) as libre`,
       );
-      return fila?.libre ? this.vencer(tx) : null;
+      if (!fila?.libre) return null;
+
+      const vencidas = await this.vencer(tx);
+      // Después de vencer: una reserva que se acaba de cancelar ya no recibe recordatorios.
+      const avisos = await this.reclamarAvisos(tx);
+      return { ...vencidas, avisos };
     });
+  }
+
+  /**
+   * Reclama los avisos programados que ya toca enviar: los anota en `avisos_reserva` y
+   * devuelve los ids de sus reservas. Lo ya anotado no se repite, así que correrlo cada
+   * minuto, o en dos réplicas, nunca envía un aviso dos veces. Si la reserva cambió (llegó,
+   * se canceló, terminó), la condición deja de cumplirse y el aviso no sale; si se extendió,
+   * la referencia (`fecha_fin`) es otra y el recordatorio de fin sale a la nueva hora.
+   */
+  private async reclamarAvisos(tx: Transaccion): Promise<AvisosReclamados> {
+    const { reservas } = schema;
+
+    // A1: faltan 5 minutos o menos para el límite de llegada y nadie ha verificado la placa.
+    const recordatorioLlegada = await this.reclamar(
+      tx,
+      'recordatorio_llegada',
+      limiteDeLlegada,
+      [
+        inArray(reservas.estado, ['pendiente', 'activa']),
+        isNull(reservas.fecha_real_inicio),
+        sql`${ahoraUtc} >= ${limiteDeLlegada} - ${minutosDeAviso}`,
+        sql`${ahoraUtc} < ${limiteDeLlegada}`,
+      ],
+    );
+
+    // A2: el vehículo está parqueado y faltan 5 minutos o menos para su `fecha_fin` actual.
+    const recordatorioFin = await this.reclamar(
+      tx,
+      'recordatorio_fin',
+      reservas.fecha_fin,
+      [
+        eq(reservas.estado, 'activa'),
+        isNotNull(reservas.fecha_real_inicio),
+        sql`${ahoraUtc} >= ${reservas.fecha_fin} - ${minutosDeAviso}`,
+        sql`${ahoraUtc} < ${reservas.fecha_fin}`,
+      ],
+    );
+
+    // B5: se canceló sin llegada cuando el plazo ya había vencido. La pudo cancelar este job
+    // o una acción tardía (cada transición vence primero), por eso se mira el estado y no quién.
+    const noLlego = await this.reclamar(tx, 'no_llego', limiteDeLlegada, [
+      eq(reservas.estado, 'cancelada'),
+      isNull(reservas.fecha_real_inicio),
+      sql`${reservas.fecha_actualizacion} >= ${limiteDeLlegada}`,
+      sql`${reservas.fecha_actualizacion} > ${ahoraUtc} - ${ventanaAvisoNoLlego}`,
+    ]);
+
+    return { recordatorioLlegada, recordatorioFin, noLlego };
+  }
+
+  /**
+   * Anota en `avisos_reserva` un aviso `tipo` para cada reserva que cumple `condiciones`, con
+   * `referencia` como la fecha que lo originó, y devuelve los ids de las que se anotaron ahora.
+   */
+  private async reclamar(
+    tx: Transaccion,
+    tipo: TipoAvisoProgramado,
+    referencia: SQLWrapper,
+    condiciones: SQL[],
+  ): Promise<number[]> {
+    const filas = await tx.execute<{ id_reserva: number }>(sql`
+      insert into ${schema.avisosReserva} (id_reserva, tipo, referencia)
+      select ${schema.reservas.id}, ${tipo}, ${referencia}
+        from ${schema.reservas}
+       where ${sql.join(condiciones, sql` and `)}
+      on conflict do nothing
+      returning id_reserva`);
+
+    return filas.map((fila) => fila.id_reserva);
+  }
+
+  /** Las reservas con su zona, para armar los textos de los avisos. */
+  async reservasConZona(ids: number[]): Promise<ReservaConZona[]> {
+    if (ids.length === 0) return [];
+
+    return this.db
+      .select({ reserva: schema.reservas, zona: columnasZona })
+      .from(schema.reservas)
+      .leftJoin(
+        schema.zonasAzules,
+        eq(schema.reservas.id_zona, schema.zonasAzules.id),
+      )
+      .where(inArray(schema.reservas.id, ids));
   }
 
   /**
@@ -478,6 +591,16 @@ export class ReservasRepository {
       .limit(1);
 
     return asignacion !== undefined;
+  }
+
+  /** Los encargados que atienden la zona: a ellos les llegan sus reservas. Puede no haber ninguno. */
+  async controladoresDeZona(idZona: number): Promise<string[]> {
+    const filas = await this.db
+      .select({ id: schema.zonasControladores.id_controlador })
+      .from(schema.zonasControladores)
+      .where(eq(schema.zonasControladores.id_zona, idZona));
+
+    return filas.map((fila) => fila.id);
   }
 
   /** Cuántas reservas hay en cada estado: todas, las de un conductor o las de las zonas de un controlador. */

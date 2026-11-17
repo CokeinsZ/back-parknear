@@ -212,6 +212,8 @@ No comparten código: un cambio de esquema hay que replicarlo a mano en cada cop
 |---|---|---|
 | `POST /auth/register` | público | Crea un conductor (contraseña con bcrypt) y devuelve `{ user, access_token }`. 409 si el correo, documento o celular ya existe. |
 | `POST /auth/login` | público | Valida correo y contraseña y devuelve `{ user, access_token }`. 401 "Credenciales invalidas". |
+| `PUT /auth/token-push` | con sesión | `{ token }`: este teléfono recibe los avisos push del usuario del JWT (si era de otra cuenta, pasa a esta). 204, o 400 si no es un `ExponentPushToken[...]`. Ver §6.8. |
+| `DELETE /auth/token-push` | con sesión | `{ token }`: el teléfono deja de recibir avisos. Solo lo quita si es del usuario del JWT. 204. |
 
 ### 6.2 users (`parknear-users-service`, puerto 3001)
 
@@ -291,6 +293,32 @@ Es un esqueleto: solo tiene `GET /` → "Hello World!". Las tablas `solicitudes_
   - cancela la búsqueda anterior si llega una nueva;
   - trae 20 elementos y ofrece "Cargar más";
   - recarga al volver a la pantalla.
+
+### 6.8 Avisos push (auth y reservations)
+
+El diseño completo, con el catálogo de avisos y las decisiones, está en el repositorio de la app: `docs/plan-notificaciones.md`.
+
+- **Qué teléfono es de quién**:
+  - Lo guarda la tabla `dispositivos_push` (migración `003_notificaciones_push.sql`), que tiene una fila por teléfono (token de Expo).
+  - Un teléfono es de una sola persona y una persona puede tener varios.
+  - Lo escribe auth-service (`PUT/DELETE /auth/token-push`): la app registra el teléfono al iniciar sesión, si el usuario dio permiso, y lo quita al cerrarla.
+- **Quién avisa**: reservations-service.
+  - El puerto `Notificador` (`src/notificaciones/`) tiene dos adaptadores:
+    - `NotificadorExpo`: un `fetch` a Expo Push. Nunca lanza; si Expo responde `DeviceNotRegistered`, borra ese teléfono.
+    - `NotificadorConsola`: solo escribe en el log. Se elige con `NOTIFICACIONES=consola`.
+  - `EXPO_ACCESS_TOKEN` solo hace falta si en expo.dev se activa *Enhanced push security*.
+- **Avisos inmediatos**: `ReservasService` los pide a `AvisosService` después de guardar el cambio, y solo si la transición se hizo.
+  - Nueva reserva → a los encargados de la zona (`zonas_controladores`).
+  - Aceptada y llegada confirmada → al conductor.
+  - El conductor canceló → a los encargados.
+  - Rechazar o cancelar como encargado **no** avisa, por decisión del plan.
+- **Avisos programados**: el job de cada minuto, en la misma transacción con candado, "reclama" en `avisos_reserva` los que ya tocan y los envía después del `COMMIT`:
+  - recordatorio 5 minutos antes del límite de llegada;
+  - recordatorio 5 minutos antes de `fecha_fin`;
+  - "no llegaste".
+
+  La llave `(id_reserva, tipo, referencia)` evita repetirlos. Si la reserva cambió (llegó, se canceló, se extendió), la condición deja de cumplirse o la referencia es otra.
+- **Textos**: `src/reservas/avisos.ts`, funciones puras. Las horas van en la hora de Colombia (`America/Bogota`), porque el servidor corre en UTC.
 
 ---
 

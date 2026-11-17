@@ -192,3 +192,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_reservas_vehiculo_en_curso
 
 ALTER TABLE zonas_azules DROP CONSTRAINT IF EXISTS ck_zonas_capacidad_total;
 ALTER TABLE zonas_azules ADD CONSTRAINT ck_zonas_capacidad_total CHECK (capacidad_total >= 0);
+
+-- Notificaciones push (igual que db/migrations/003_notificaciones_push.sql).
+
+-- Teléfonos que reciben avisos push. El token identifica el teléfono: es de UNA persona,
+-- y una persona puede tener varios teléfonos.
+CREATE TABLE IF NOT EXISTS dispositivos_push (
+  token VARCHAR(255) PRIMARY KEY,
+  id_usuario UUID NOT NULL REFERENCES usuarios (id) ON DELETE CASCADE ON UPDATE CASCADE,
+  fecha_actualizacion TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc')
+);
+CREATE INDEX IF NOT EXISTS ix_dispositivos_push_usuario ON dispositivos_push (id_usuario);
+
+-- Avisos programados que ya salieron (recordatorios y "no llegaste"). La llave impide repetirlos;
+-- como incluye la fecha de referencia, extender una reserva genera un recordatorio de fin nuevo.
+CREATE TABLE IF NOT EXISTS avisos_reserva (
+  id_reserva INTEGER NOT NULL REFERENCES reservas (id) ON DELETE CASCADE ON UPDATE CASCADE,
+  tipo VARCHAR(32) NOT NULL,
+  referencia TIMESTAMP NOT NULL,
+  enviado_en TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc'),
+  PRIMARY KEY (id_reserva, tipo, referencia)
+);

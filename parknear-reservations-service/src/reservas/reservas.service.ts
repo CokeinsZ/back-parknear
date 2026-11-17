@@ -8,6 +8,7 @@ import {
 import { normalizarBusqueda, type Paginacion } from 'src/common/busqueda';
 import { errorDePostgres } from 'src/database/errores';
 import { estadoReservaEnum } from 'src/database/schema';
+import { AvisosService } from './avisos.service';
 import { CreateReservaDto } from './dtos/create-reserva.dto';
 import type { EstadoDelEncargado } from './dtos/update-reserva-state.dto';
 import { EstadoReserva, ReservaRecord } from './interfaces/reserva.interface';
@@ -90,13 +91,21 @@ function vencioSinLlegar(reserva: ReservaRecord): boolean {
   );
 }
 
+/*
+ * Los avisos push salen DESPUÉS de que el repositorio guardó el cambio (la transacción ya se
+ * confirmó), y solo en el camino feliz: un 409 no avisa a nadie. AvisosService nunca lanza.
+ */
 @Injectable()
 export class ReservasService {
-  constructor(private readonly reservasRepository: ReservasRepository) {}
+  constructor(
+    private readonly reservasRepository: ReservasRepository,
+    private readonly avisosService: AvisosService,
+  ) {}
 
   /**
    * Crea una reserva `pendiente` para el conductor del token. En una transacción revisa que
    * el vehículo sea suyo, que no tenga otra reserva en curso y que la zona esté operativa y con cupo.
+   * Avisa a los encargados de la zona.
    */
   async create(
     dto: CreateReservaDto,
@@ -113,6 +122,8 @@ export class ReservasService {
       .catch((error: unknown) => this.handleDbError(error, placa));
 
     if (resultado.error) throw this.errorAlCrear(resultado.error, placa);
+
+    await this.avisosService.nuevaReserva(resultado.reserva);
     return resultado.reserva;
   }
 
@@ -261,6 +272,7 @@ export class ReservasService {
   /**
    * El encargado acepta (`pendiente` → `activa`) o rechaza/cancela (→ `cancelada`).
    * No toca fechas. Cancelar sin llegada deja el precio en el cargo de reserva.
+   * Aceptar avisa al conductor; rechazar o cancelar no (decisión del plan de notificaciones).
    */
   async updateState(
     id: number,
@@ -273,12 +285,18 @@ export class ReservasService {
       id,
       estado,
     );
-    if (reserva) return reserva;
+    if (reserva) {
+      if (estado === 'activa') await this.avisosService.aceptada(reserva);
+      return reserva;
+    }
 
     throw this.transicionRechazada(actual);
   }
 
-  /** El encargado verificó la placa: registra la llegada. La reserva sigue `activa`. */
+  /**
+   * El encargado verificó la placa: registra la llegada. La reserva sigue `activa`.
+   * Avisa al conductor; su recordatorio de llegada ya no sale.
+   */
   async confirmarLlegada(
     id: number,
     solicitante: Solicitante,
@@ -287,7 +305,10 @@ export class ReservasService {
 
     const { reserva, actual } =
       await this.reservasRepository.confirmarLlegada(id);
-    if (reserva) return reserva;
+    if (reserva) {
+      await this.avisosService.llegadaConfirmada(reserva);
+      return reserva;
+    }
 
     if (actual?.estado === 'pendiente') {
       throw conflicto(
@@ -319,14 +340,20 @@ export class ReservasService {
     );
   }
 
-  /** El conductor dueño cancela su reserva mientras no le hayan verificado la placa. Solo se cobra el cargo de reserva. */
+  /**
+   * El conductor dueño cancela su reserva mientras no le hayan verificado la placa. Solo se cobra
+   * el cargo de reserva. Avisa a los encargados de la zona.
+   */
   async cancelarPorConductor(
     id: number,
     userId: string,
   ): Promise<ReservaRecord> {
     const { reserva, actual } =
       await this.reservasRepository.cancelarPorConductor(id, userId);
-    if (reserva) return reserva;
+    if (reserva) {
+      await this.avisosService.canceladaPorConductor(reserva);
+      return reserva;
+    }
 
     if (
       actual?.id_conductor === userId &&

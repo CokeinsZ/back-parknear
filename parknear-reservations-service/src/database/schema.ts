@@ -146,3 +146,36 @@ export const reservasEnCurso = pgView('reservas_en_curso', {
   id_conductor: uuid('id_conductor'),
   estado: estadoReservaEnum('estado').notNull(),
 }).existing(); // existing(): drizzle-kit no intenta crearla
+
+/**
+ * Teléfonos donde cada usuario recibe avisos push (db/migrations/003_notificaciones_push.sql).
+ * Los registra auth-service; aquí solo se leen y se borran los que Expo ya no reconoce.
+ */
+export const dispositivosPush = pgTable('dispositivos_push', {
+  token: varchar('token', { length: 255 }).primaryKey(),
+  id_usuario: uuid('id_usuario')
+    .notNull()
+    .references(() => usuarios.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
+  fecha_actualizacion: timestamp('fecha_actualizacion', { mode: 'date' })
+    .notNull()
+    .default(sql`(now() at time zone 'utc')`),
+});
+
+/**
+ * Avisos programados que el job ya envió (db/migrations/003_notificaciones_push.sql). La llave
+ * impide repetirlos; incluye la fecha de referencia, así que extender una reserva genera otro.
+ */
+export const avisosReserva = pgTable(
+  'avisos_reserva',
+  {
+    id_reserva: integer('id_reserva')
+      .notNull()
+      .references(() => reservas.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
+    tipo: varchar('tipo', { length: 32 }).notNull(),
+    referencia: timestamp('referencia', { mode: 'date' }).notNull(),
+    enviado_en: timestamp('enviado_en', { mode: 'date' })
+      .notNull()
+      .default(sql`(now() at time zone 'utc')`),
+  },
+  (table) => [primaryKey({ columns: [table.id_reserva, table.tipo, table.referencia] })],
+);
